@@ -433,8 +433,9 @@ policy.
 
 The assessment execution role is more restricted than the deployment identity:
 assessment checks use read/list/describe actions. The role can additionally read
-the named source bucket, write reports only to the WAFA results bucket, write
-its service logs, and publish to the optional WAFA SNS topic.
+the source archive in the named source bucket, write reports only to the WAFA
+results bucket, write its service logs, and publish to the optional WAFA SNS
+topic.
 
 ## Development
 
@@ -481,6 +482,33 @@ Commit the rebuilt assets and regenerated sample reports with the UI change. CI
 rebuilds the bundle, regenerates the sample reports through the production
 orchestrator, and fails if either tracked output is stale.
 
+### Security scanning
+
+The repository is scanned with
+[Automated Security Helper (ASH)](https://github.com/awslabs/automated-security-helper),
+pinned to `v3.7.1`. ASH runs SAST, secret-detection, infrastructure-as-code,
+and dependency scanners such as Bandit, Semgrep, detect-secrets, Checkov,
+cfn-nag, and Grype. Two GitHub workflows run it:
+
+- `ash-security-scan.yml` scans files added or modified by a pull request.
+- `ash-full-repository-scan.yml` scans the full repository on every push to
+  `main`, monthly, and on manual dispatch.
+
+Both workflows fail on actionable findings at `MEDIUM` severity or higher and
+upload the ASH reports as workflow artifacts. Scan settings, ignored generated
+paths, and reviewed suppressions live in `.ash/.ash.yaml`. Every suppression
+must state its reason.
+
+To run the same scan locally, you need Python 3.10+ and a container runtime
+such as Docker or Finch:
+
+```bash
+pip install "git+https://github.com/awslabs/automated-security-helper.git@v3.7.1"
+ash --mode container     # Add --oci-runner finch when using Finch
+```
+
+Results are written to `.ash/ash_output/`, which Git ignores.
+
 </details>
 
 ## Project Structure
@@ -490,6 +518,8 @@ orchestrator, and fails if either tracked output is stale.
 
 ```text
 sample-wa-foundations-assessment/
+├── .ash/.ash.yaml               # ASH scan settings and suppressions
+├── .github/workflows/           # CI, dependency audit, and ASH scans
 ├── src/
 │   ├── main.py                  # Orchestrator
 │   ├── discovery/
@@ -508,6 +538,8 @@ sample-wa-foundations-assessment/
 │       ├── assets/              # Built Cloudscape UI bundle (generated)
 │       └── csv_export.py        # CSV export
 ├── report-ui/                   # Cloudscape React source for the HTML report
+├── scripts/                     # Sample report generator
+├── sample-reports/              # Generated sample HTML, CSV, and JSON
 ├── tests/unit/                  # 170 pytest tests, 95% coverage
 ├── deployment/
 │   └── wafa-stack.yaml          # CloudFormation template

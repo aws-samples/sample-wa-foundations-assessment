@@ -28,8 +28,10 @@ htmlcov/
 
 # Local tooling state
 .holmes/
-.ash/
 
+# ASH security scanner: retain only the repository configuration
+.ash/*
+!.ash/.ash.yaml
 
 # Generated artifacts
 reports/

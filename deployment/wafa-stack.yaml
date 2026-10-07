@@ -73,6 +73,25 @@ Resources:
         - Key: Application
           Value: WA-Foundations-Assessment
 
+  # Deny any request to the results bucket that does not use TLS.
+  WAFAResultsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WAFAResultsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt WAFAResultsBucket.Arn
+              - !Sub '${WAFAResultsBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
   # ============================================================================
   # IAM Role — ReadOnly assessment permissions (FR-1.2, NFR-1.1, NFR-1.2)
   # ============================================================================
@@ -142,7 +161,7 @@ Resources:
               - s3:GetObjectVersion
               - s3:GetObjectTagging
               - s3:GetObjectVersionTagging
-            Resource: !Sub 'arn:${AWS::Partition}:s3:::${SourceBucket}/*'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${SourceBucket}/${SourceKey}'
           # CloudWatch Logs for CodeBuild (scoped to specific log group)
           - Effect: Allow
             Action:
@@ -238,17 +257,29 @@ Resources:
             Action:
               - codebuild:StartBuild
             Resource: !GetAtt WAFAProject.Arn
+
+  # Scoped to the generated function name. Attached through Roles rather than
+  # the role's ManagedPolicyArns to avoid a role -> policy -> function cycle.
+  WAFATriggerLogsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: CloudWatch Logs permissions for the assessment trigger Lambda
+      Roles:
+        - !Ref WAFATriggerLambdaRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
           - Effect: Allow
             Action:
               - logs:CreateLogGroup
             Resource:
-              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/WAFATriggerLambda-*'
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${WAFATriggerLambda}'
           - Effect: Allow
             Action:
               - logs:CreateLogStream
               - logs:PutLogEvents
             Resource:
-              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/WAFATriggerLambda-*:*'
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${WAFATriggerLambda}:*'
 
   WAFATriggerLambda:
     Type: AWS::Lambda::Function
@@ -288,6 +319,8 @@ Resources:
 
   WAFATrigger:
     Type: Custom::WAFATrigger
+    # Grant log permissions before the first invocation.
+    DependsOn: WAFATriggerLogsPolicy
     Properties:
       ServiceToken: !GetAtt WAFATriggerLambda.Arn
       ProjectName: !Ref WAFAProject

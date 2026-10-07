@@ -131,11 +131,45 @@ git diff --check
   && npm run build) && git diff --exit-code -- src/report/assets/
 ```
 
+When a container runtime (Docker or Finch) is available, also run the ASH
+security scan before pushing:
+
+```bash
+python -m pip install \
+  "git+https://github.com/awslabs/automated-security-helper.git@v3.7.1"
+ash --mode container     # Add --oci-runner finch when using Finch
+```
+
 Run focused tests while iterating, but run the complete unit suite before
 finishing a code change. The GitHub lint workflow runs the latest Ruff release,
 which may enforce rules that are not present in the version pinned for local
 development; the `uv tool run` commands above intentionally reproduce that
 behavior.
+
+## Security Scanning
+
+[Automated Security Helper (ASH)](https://github.com/awslabs/automated-security-helper)
+runs in two GitHub workflows:
+
+- `ash-security-scan.yml`: files added or modified by a pull request
+- `ash-full-repository-scan.yml`: the full repository on push to `main`,
+  monthly, and on manual dispatch
+
+Both fail on actionable findings at `MEDIUM` severity or higher.
+
+- Keep ASH pinned to a released version. The version appears in both
+  workflows' `ASH_VERSION`, in `README.md`, and in this file; update them
+  together.
+- Keep GitHub Actions in the ASH workflows pinned to full commit SHAs with a
+  version comment.
+- `.ash/.ash.yaml` is the single ASH configuration. Use `ignore_paths` only for
+  generated, vendored, or untracked content; use `suppressions` for reviewed
+  findings in tracked source.
+- Every suppression must name a specific `rule_id` and `path`, give a concrete
+  `reason`, and use an `expiration` date when the exception is temporary.
+- Fix real findings rather than suppressing them. Do not suppress findings just
+  to make CI pass without the user's approval.
+- `.ash/ash_output/` is local scan output and must not be committed.
 
 ## AWS Safety and Scope
 

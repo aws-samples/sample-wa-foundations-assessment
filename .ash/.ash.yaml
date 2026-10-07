@@ -1,0 +1,108 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/awslabs/automated-security-helper/v3.7.1/automated_security_helper/schemas/AshConfig.json
+# Automated Security Helper (ASH) configuration. Used by local scans and by the
+# ASH GitHub workflows. Scan output is written to .ash/ash_output/ (ignored).
+project_name: sample-wa-foundations-assessment
+fail_on_findings: true
+global_settings:
+  severity_threshold: MEDIUM
+  ignore_paths:
+    - path: "src/report/assets/**"
+      reason: >-
+        Generated report UI bundle built from report-ui/, which is scanned
+        directly. Minified vendor code produces high-entropy false positives.
+    - path: "sample-reports/**"
+      reason: >-
+        Generated sample reports that inline the report UI bundle and contain
+        only placeholder identifiers.
+    - path: "**/node_modules/**"
+      reason: Installed third-party packages, not committed.
+    - path: "**/.venv/**"
+      reason: Local virtual environment, not committed.
+    - path: ".codegraph/**"
+      reason: Local code index, not committed.
+    - path: "coverage.xml"
+      reason: Local test coverage output, not committed.
+  # Reviewed false positives. Rule IDs are fnmatch patterns, so the literal
+  # "[", "]", and "*" in cdk-nag IDs are escaped as "[[]", "[]]", and "[*]".
+  suppressions:
+    # === Custom resource Lambda (WAFATriggerLambda) ===
+    - rule_id: CKV_AWS_117
+      path: deployment/wafa-stack.yaml
+      reason: >-
+        The custom resource Lambda only calls the public CodeBuild API and the
+        CloudFormation response URL. VPC placement would require NAT or VPC
+        endpoints without reducing exposure.
+    - rule_id: CFN_NAG_W89
+      path: deployment/wafa-stack.yaml
+      reason: Same as CKV_AWS_117; the trigger Lambda needs no VPC access.
+    - rule_id: CKV_AWS_115
+      path: deployment/wafa-stack.yaml
+      reason: >-
+        The trigger Lambda is invoked only by CloudFormation, once per stack
+        lifecycle event, so reserved concurrency adds no protection.
+    - rule_id: CFN_NAG_W92
+      path: deployment/wafa-stack.yaml
+      reason: Same as CKV_AWS_115; invocation is limited to CloudFormation.
+    - rule_id: CKV_AWS_116
+      path: deployment/wafa-stack.yaml
+      reason: >-
+        The handler reports success or failure to CloudFormation through
+        cfnresponse. CloudFormation does not consume a dead-letter queue.
+    - rule_id: AwsSolutions-L1
+      path: deployment/wafa-stack.yaml
+      reason: >-
+        The trigger Lambda intentionally uses python3.12, the repository's
+        standard Python version for CI and CodeBuild. It is a supported Lambda
+        runtime; revisit before its deprecation.
+      expiration: "2028-06-30"
+    - rule_id: CFN_NAG_W58
+      path: deployment/wafa-stack.yaml
+      reason: >-
+        WAFATriggerLogsPolicy grants CloudWatch Logs access to the trigger
+        role through ManagedPolicy Roles, which cfn-nag does not evaluate.
+    # === IAM wildcards required by AWS resource formats ===
+    - rule_id: CFN_NAG_W13
+      path: deployment/wafa-stack.yaml
+      reason: >-
+        The Resource "*" statement contains only read-only Describe, List, and
+        Get assessment actions, most of which do not support resource-level
+        permissions.
+    - rule_id: "AwsSolutions-IAM5[[]Resource::[*][]]"
+      path: deployment/wafa-stack.yaml
+      reason: Same as CFN_NAG_W13; read-only assessment actions only.
+    - rule_id: "AwsSolutions-IAM5[[]Resource::<WAFAResultsBucket.Arn>/[*][]]"
+      path: deployment/wafa-stack.yaml
+      reason: >-
+        s3:PutObject is limited to objects in the WAFA-owned results bucket;
+        report keys are generated per run.
+    - rule_id: "AwsSolutions-IAM5[[]Resource::arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:/aws/codebuild/<AWS::StackName>:[*][]]"
+      path: deployment/wafa-stack.yaml
+      reason: >-
+        Log stream names are generated per build. The wildcard covers streams
+        in the stack's own CodeBuild log group only.
+    - rule_id: "AwsSolutions-IAM5[[]Resource::arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:/aws/lambda/<WAFATriggerLambda>:[*][]]"
+      path: deployment/wafa-stack.yaml
+      reason: >-
+        Log stream names are generated per invocation. The wildcard covers
+        streams in the trigger Lambda's own log group only.
+    # === CodeBuild and naming ===
+    - rule_id: CFN_NAG_W32
+      path: deployment/wafa-stack.yaml
+      reason: >-
+        The CodeBuild project uses NO_ARTIFACTS, so a customer managed KMS key
+        would protect no build output. Reports go to the SSE-encrypted results
+        bucket.
+    - rule_id: AwsSolutions-CB4
+      path: deployment/wafa-stack.yaml
+      reason: Same as CFN_NAG_W32; the project produces no build artifacts.
+    - rule_id: CFN_NAG_W28
+      path: deployment/wafa-stack.yaml
+      reason: >-
+        The CodeBuild role name is stack-scoped by design so deployment and
+        teardown can identify it.
+    # === GitHub Actions ===
+    - rule_id: CKV2_GHA_1
+      path: .github/workflows/label.yml
+      reason: >-
+        The only job sets explicit contents read and pull-requests write
+        permissions, which replace the default token permissions.
