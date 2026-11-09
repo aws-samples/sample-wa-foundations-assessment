@@ -335,6 +335,36 @@ For each, set up the "good" and "bad" state and confirm status flips correctly.
 ### E11. No IAM users (FR-6.2)
 - Zero IAM users → complete; ≥1 user → incomplete.
 
+### E12. Organization and OU account map (FR-12, informational)
+- Management account. **Expected:** the report's Organization Map section lists every OU
+  and shows each account under the OU that actually contains it. Compare against the
+  AWS Organizations console — the hierarchy and placement should match exactly.
+- Confirm the map changes **no** check result and **no** maturity level: run before and
+  after, and diff `wafa-checks.csv`. It must be identical.
+- Suspended accounts appear with their status rather than being omitted.
+- Account email addresses appear **nowhere** in any artifact (grep the outputs for `@`).
+- **Directly attached vs inherited:** attach an SCP to a parent OU only. **Expected:** it
+  is listed on the parent, and *not* repeated on child OUs or accounts. This is the most
+  commonly misread part of the output.
+- Member/standalone account. **Expected:** no Organization Map section, and no
+  `wafa-org-map.csv` or diagram files — absent, not an errored section.
+
+### E13. Policy type coverage in the map (FR-12.3)
+- With RCPs not enabled, confirm the section states that RCP is not enabled rather
+  than silently showing nothing.
+- Enable Tag or Backup policies and attach one. **Expected:** it appears under the
+  "Other Directly Attached Policies" CSV column and as a badge in the report.
+- Attach an SCP directly to an *account*. **Expected:** it appears on that account's row,
+  with no flag or extra option needed.
+- Large organization (hundreds of OUs): **expected:** completes without throttling, and
+  `policyLookupErrors` in `wafa-raw.json` is empty. Record timings and the call count.
+  Attachment lookups should scale with the number of policies, not the number of OUs, so
+  a big organization with few policies should be no slower than a small one.
+- Throttle deliberately (many policies, or run concurrently with other Organizations
+  callers). **Expected:** the report warns "Attached policies may be incomplete" and names
+  the affected policy type or policy; it never shows an empty policy list as if nothing
+  were attached.
+
 ---
 
 ## Group F — Maturity scoring
@@ -390,9 +420,10 @@ Owner: ____
   column populated only for error checks.
 
 ### G6. Raw JSON schema
-- wafa-raw.json contains `account_info`, `maturity`, `checks[]`, `delegated_administrators[]`.
-  The HTML report data uses the same `delegated_administrators` and
-  `delegated_administrators_error` keys.
+- wafa-raw.json contains `account_info`, `maturity`, `checks[]`, `delegated_administrators[]`,
+  and `organization_map` (management account) or `null` (limited mode).
+  The HTML report data uses the same `delegated_administrators`,
+  `delegated_administrators_error`, `organization_map`, and `organization_map_error` keys.
   Every check has: check, description, status, required, weight, loe, remediationLink (+ error if error).
 
 ### G7. Special characters don't break the report
@@ -402,6 +433,14 @@ Owner: ____
 ### G8. Delegated admins table (management only)
 - With ≥1 delegated administrator, confirm the table lists account + services;
   with none, confirm the section handles empty gracefully.
+
+### G9. Organization map CSV (FR-12.4)
+- `wafa-org-map.csv` opens in a spreadsheet with 10 columns and one row per root,
+  OU, and account.
+- Confirm it agrees with the report's Organization Map table, including account
+  placement and the SCP, RCP, and other-policy columns.
+- An OU or account name containing a comma or quote round-trips correctly
+  (the csv module quotes it).
 
 ---
 
@@ -424,6 +463,11 @@ Owner: ____
 - If listing one delegated administrator's services fails, **expected:** that
   administrator retains any services already found and has `servicesError`;
   later administrators still appear without a list-level error.
+- Deny `organizations:ListPolicies` or `organizations:ListTargetsForPolicy`. **Expected:**
+  the Organization Map still shows the hierarchy and account placement, with a warning that
+  attached policies may be incomplete; the assessment and maturity level are unaffected.
+- Deny `organizations:ListAccountsForParent`. **Expected:** affected OUs show an account
+  listing warning and sibling branches still list their accounts.
 
 ### H3. CodeBuild timeout boundary
 - Very large org / many regions. **Expected:** completes within the 10-min CodeBuild timeout,

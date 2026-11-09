@@ -361,6 +361,58 @@ Based on the AWS Well-Architected Foundations maturity model (March 2026). Maps 
   | 4 | Advanced | Organization service integrations, preventive and detective controls, and management-account hygiene checks are complete. |
   | 5 | Expert | Every check returned by the current Well-Architected Foundations Assessment report is complete. |
 
+### FR-12: Organization and OU Account Map
+**Prerequisite:** Only run if management account. These are INFORMATIONAL only (no pass/fail check generated),
+so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. The OU and policy-type
+*checks* in FR-3.6–FR-3.12 remain the scored view of the same services.
+- FR-12.1: Walk the OU hierarchy from `organizations.listRoots()`, using
+  `organizations.listOrganizationalUnitsForParent()` (paginate fully) recursively. Bound the recursion at
+  5 levels below the root, which is the AWS Organizations nesting limit, and flag `depthTruncated` when
+  the limit is reached rather than implying the map is complete.
+- FR-12.2: For each root and OU, call `organizations.listAccountsForParent()` (paginate fully) to record
+  account placement. Include suspended accounts with their `status`; do not drop them. Record the account
+  `id`, `name`, and `status` only — never the account email address, which is personal data not needed to
+  place an account.
+- FR-12.3: Collect policy attachments by enumerating policies, not by interrogating targets. For each policy
+  type that is `ENABLED` on the root, call `organizations.listPolicies()` (paginate fully); then for each
+  policy returned, call `organizations.listTargetsForPolicy()` (paginate fully) and attach it to the matching
+  root, OU, or account, recording policy `id`, `name`, `type`, and `awsManaged`.
+  - Both this and the per-target alternative report only **directly attached** policies, never inherited
+    ones. An empty list means nothing is attached at that level, not that no policy applies.
+  - The cost is `enabled policy types + policies`, which grows with the number of policies. Interrogating
+    each target instead costs `targets x enabled policy types`, which grows with the size of the
+    organization and throttles on large ones. Account-level attachments arrive in the same responses, so
+    they are always included and need no opt-in flag.
+  - Only types enabled on the root are queried, so `PolicyTypeNotEnabledException` is avoided rather than
+    handled. `PolicyTypeNotEnabledException` and `UnsupportedAPIEndpointException` are still treated as a
+    confirmed absence (the type is not in use, or not offered in this partition).
+  - Use a bounded `ThreadPoolExecutor`, creating the client in the calling thread (see NFR-2.2), and await
+    every lookup so one failure cannot hide another policy's attachments.
+  - Configure the Organizations client with **adaptive** retries. Organizations enforces a low request rate
+    and standard mode has no client-side rate limiting, so a burst of concurrent reads exhausts its attempts
+    and silently loses attachments.
+  - Any other failure is recorded in `policyLookupErrors` as `{scope, error}`, where `scope` is the policy
+    type (when listing policies failed) or `"<type>: <name>"` (when listing one policy's targets failed).
+    An error means attachments may be incomplete and must be surfaced rather than rendered as an empty list.
+  - Report `policyTypesNotEnabled` for SERVICE_CONTROL_POLICY and RESOURCE_CONTROL_POLICY so the map states
+    plainly when a guardrail type is not in use at all.
+- FR-12.4: Generate `wafa-org-map.csv` with one row per root, OU, and account, separating directly attached
+  SCPs, RCPs, and other policy types into their own columns. Keep it separate from `wafa-checks.csv`, which
+  stays one row per check.
+- FR-12.5: Display as a separate "Organization Map" section in the HTML report, below the check results,
+  with an indented structure table, account placement, status, and attached-policy badges. Print a one-line
+  console summary of OU, account, and attachment counts.
+  - Also included in `wafa-raw.json` as `organization_map`, plus `organization_map_error` when the map could
+    not be built. The HTML report data uses the same keys.
+  - A per-node failure is recorded on that node as `accountsError` or `childrenError` and keeps the rest of
+    the map, mirroring FR-9's partial-result behavior. Policy lookup failures are organization-wide rather
+    than per-node and are reported through `policyLookupErrors`.
+  - NOT scored — informational reference only.
+- Output: `{organizationId, managementAccountId, root, enabledPolicyTypes, policyTypesNotEnabled,
+  policyLookupErrors, totals: {organizationalUnits, accounts, maxDepth}, depthTruncated?}`, where each node
+  is `{id, name, type, path, depth, policies: [...], accounts: [...], children: [...]}` and each account is
+  `{id, name, status, policies: [...]}`.
+
 ## Non-Functional Requirements
 
 ### NFR-1: Security

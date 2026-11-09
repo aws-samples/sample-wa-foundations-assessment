@@ -4,7 +4,7 @@
 
 ![License: MIT-0](https://img.shields.io/badge/License-MIT--0-yellow.svg)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
-![Tests](https://img.shields.io/badge/tests-225%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-269%20passing-brightgreen.svg)
 
 WAFA is an open-source AWS foundations assessment tool. Its assessment checks
 use read, list, and describe APIs to evaluate organization-level configuration
@@ -97,6 +97,39 @@ multi-account landing zone.
 - **CSV export** for spreadsheet or work-item import
 - **Raw JSON** for automation
 - **Console table** summary
+- **Organization and OU account map** — management account only, see
+  [Organization map](#organization-map)
+
+### Organization map
+
+From the management account, WAFA also records the organization's structure
+alongside the assessment: every OU, which accounts sit in each OU, and the
+policies attached at each level. It appears as an **Organization Map** section
+in the HTML report and as `wafa-org-map.csv`, one row per root, OU, and
+account, with separate columns for directly attached SCPs, RCPs, and other
+policy types.
+
+It is **informational only** and does not affect any check result or the
+maturity level. The scored view of the same services stays with the existing
+OU and policy-type checks.
+
+**Only direct attachments are reported.** A level with no entry has nothing
+attached *there*; it can still inherit a policy from an ancestor. The map
+covers every policy type enabled on the organization root, and names SCPs and
+RCPs explicitly when they are not enabled at all.
+
+Attachments are found by listing the organization's policies and then asking
+where each one is attached, rather than asking every OU and account what it
+has. That costs one call per enabled policy type plus one per policy, so it
+scales with the number of policies rather than the size of the organization —
+a 500-OU organization with 50 policies needs roughly 59 calls instead of
+several thousand. Account-level attachments arrive in the same responses, so
+they are always included at no extra cost.
+
+Suspended accounts are listed with their status rather than omitted, so the map
+matches what the Organizations console shows. If a policy lookup is throttled
+or denied, the report says attachments may be incomplete instead of showing an
+empty list.
 
 ### Check result statuses
 
@@ -122,6 +155,8 @@ placeholder account data lives in [`sample-reports/`](sample-reports/):
 - [`wafa-report.html`](sample-reports/wafa-report.html) — HTML report source
 - [`wafa-checks.csv`](sample-reports/wafa-checks.csv) — CSV export
 - [`wafa-raw.json`](sample-reports/wafa-raw.json) — raw JSON
+- [`wafa-org-map.csv`](sample-reports/wafa-org-map.csv) — organization and OU
+  account map
 
 > The GitHub file links show the HTML, CSV, and JSON as source. Use
 > **View a sample report** to see the report as an interactive page.
@@ -479,14 +514,14 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 
-# Run tests (225 tests)
+# Run tests (269 tests)
 python -m pytest tests/unit/ -v
 
 # Run with coverage
 python -m pytest tests/unit/ --cov=src --cov-report=term-missing
 ```
 
-The current suite contains 225 tests and reports 97% statement coverage.
+The current suite contains 269 tests and reports 97% statement coverage.
 
 ### Report UI
 
@@ -559,15 +594,16 @@ sample-wa-foundations-assessment/
 │   │   ├── identity.py          # FR-6: IAM/IDC (2 checks)
 │   │   ├── account_resources.py # FR-7/8: Account resources (8 checks)
 │   │   ├── delegated_admin.py   # FR-9: Informational admins
-│   │   └── maturity.py          # FR-11: Level 1–5 scoring
+│   │   ├── maturity.py          # FR-11: Level 1–5 scoring
+│   │   └── org_map.py           # FR-12: Informational OU/account map
 │   └── report/
 │       ├── html_report.py       # HTML shell and report data payload
 │       ├── assets/              # Built Cloudscape UI bundle (generated)
-│       └── csv_export.py        # CSV export
+│       └── csv_export.py        # CSV and organization map CSV export
 ├── report-ui/                   # Cloudscape React source for the HTML report
 ├── scripts/                     # Sample report generator
-├── sample-reports/              # Generated sample HTML, CSV, and JSON
-├── tests/unit/                  # 225 pytest tests, 97% coverage
+├── sample-reports/              # Generated sample report, checks, and org map
+├── tests/unit/                  # 269 pytest tests, 97% coverage
 ├── deployment/
 │   └── wafa-stack.yaml          # CloudFormation template
 ├── deploy.sh                    # Deployment script

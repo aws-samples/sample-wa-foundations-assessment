@@ -138,9 +138,14 @@ def run():
             default_region=partition_info["default_region"],
         )
 
+    # Informational, management account only, never scored (FR-9, FR-12)
+    #   delegated_admins, delegated_admins_error = get_delegated_administrators()
+    #   org_map, org_map_error = get_organization_map()
+
     # Calculate maturity and generate reports
     maturity = calculate_maturity_level(checks)
-    # main.py writes wafa-report.html, wafa-checks.csv, and wafa-raw.json
+    # main.py writes wafa-report.html, wafa-checks.csv, and wafa-raw.json, plus
+    # wafa-org-map.csv whenever an organization map was built (FR-12.4)
     
     # Print summary to terminal
     print_summary(checks, maturity)
