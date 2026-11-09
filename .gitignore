@@ -42,6 +42,8 @@ reports/
 /wafa-report.html
 /wafa-checks.csv
 /wafa-raw.json
+# Organization map (FR-12): real OU names, account names, account IDs.
+/wafa-org-map.csv
 
 # Local archive
 archive/

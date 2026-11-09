@@ -25,7 +25,8 @@ after changing ``report-ui/`` rebuild it first (``npm run build`` in
 JSON agree and that the HTML embeds the current bundle and report data.
 
 Regenerate with:  python -m scripts.generate_sample_report
-Output:           sample-reports/{wafa-report.html,wafa-checks.csv,wafa-raw.json}
+Output:           sample-reports/{wafa-report.html,wafa-checks.csv,wafa-raw.json,
+                  wafa-org-map.csv}
 """
 
 import csv
@@ -35,7 +36,8 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 
-from src.report.csv_export import generate_csv
+from src.checks.org_map import flatten_rows
+from src.report.csv_export import generate_csv, generate_org_map_csv
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS_DIR = os.path.join(REPO_ROOT, "src", "report", "assets")
@@ -98,15 +100,101 @@ def _sample_management_account_client_factory():
                     ]
                 }
             ]
+            # Realistic gap: no Infrastructure OU yet → that check reports
+            # incomplete. Keyed by parent so the FR-12 organization map walks a
+            # finite hierarchy, with one nested OU to show depth.
+            child_ous = {
+                "r-root": [
+                    {"Id": "ou-sec", "Name": "Security"},
+                    {"Id": "ou-wl", "Name": "Workloads"},
+                ],
+                "ou-wl": [{"Id": "ou-prod", "Name": "Production"}],
+            }
             ou_paginator = MagicMock()
-            # Realistic gap: no Infrastructure OU yet → that check reports incomplete.
-            ou_paginator.paginate.return_value = [
-                {
-                    "OrganizationalUnits": [
-                        {"Id": "ou-sec", "Name": "Security"},
-                        {"Id": "ou-wl", "Name": "Workloads"},
-                    ]
-                }
+            ou_paginator.paginate.side_effect = lambda ParentId: [
+                {"OrganizationalUnits": child_ous.get(ParentId, [])}
+            ]
+
+            # FR-12: account placement per OU and directly attached policies.
+            accounts_for_parent = {
+                "r-root": [
+                    {"Id": MGMT_ACCOUNT_ID, "Name": "Management", "Status": "ACTIVE"}
+                ],
+                "ou-sec": [
+                    {"Id": LOG_ARCHIVE_ID, "Name": "Log Archive", "Status": "ACTIVE"},
+                    {"Id": AUDIT_ID, "Name": "Audit", "Status": "ACTIVE"},
+                ],
+                "ou-prod": [
+                    {"Id": WORKLOAD_ID, "Name": "Workload-Prod", "Status": "ACTIVE"}
+                ],
+            }
+            afp_paginator = MagicMock()
+            afp_paginator.paginate.side_effect = lambda ParentId: [
+                {"Accounts": accounts_for_parent.get(ParentId, [])}
+            ]
+
+            # FR-12.3: policies are enumerated by type, then located by target.
+            # BACKUP_POLICY is enabled but has no policies, exercising the
+            # "enabled but unused" path.
+            policies_by_type = {
+                "SERVICE_CONTROL_POLICY": [
+                    {
+                        "Id": "p-FullAWSAccess",
+                        "Name": "FullAWSAccess",
+                        "Type": "SERVICE_CONTROL_POLICY",
+                        "AwsManaged": True,
+                    },
+                    {
+                        "Id": "p-example-denyroot",
+                        "Name": "DenyRootUserActions",
+                        "Type": "SERVICE_CONTROL_POLICY",
+                        "AwsManaged": False,
+                    },
+                ],
+                "TAG_POLICY": [
+                    {
+                        "Id": "p-example-tags",
+                        "Name": "RequireCostCenterTag",
+                        "Type": "TAG_POLICY",
+                        "AwsManaged": False,
+                    }
+                ],
+                "BACKUP_POLICY": [],
+            }
+            lp_paginator = MagicMock()
+            lp_paginator.paginate.side_effect = lambda Filter: [
+                {"Policies": policies_by_type.get(Filter, [])}
+            ]
+
+            # An account-level attachment is included because the inverted
+            # lookup returns account targets at no extra cost.
+            targets_by_policy = {
+                "p-FullAWSAccess": [
+                    {"TargetId": "r-root", "Type": "ROOT", "Name": "Root"}
+                ],
+                "p-example-denyroot": [
+                    {
+                        "TargetId": "ou-sec",
+                        "Type": "ORGANIZATIONAL_UNIT",
+                        "Name": "Security",
+                    },
+                    {
+                        "TargetId": WORKLOAD_ID,
+                        "Type": "ACCOUNT",
+                        "Name": "Workload-Prod",
+                    },
+                ],
+                "p-example-tags": [
+                    {
+                        "TargetId": "ou-prod",
+                        "Type": "ORGANIZATIONAL_UNIT",
+                        "Name": "Production",
+                    }
+                ],
+            }
+            tfp_paginator = MagicMock()
+            tfp_paginator.paginate.side_effect = lambda PolicyId: [
+                {"Targets": targets_by_policy.get(PolicyId, [])}
             ]
             da_paginator = MagicMock()
             da_paginator.paginate.return_value = [
@@ -122,6 +210,9 @@ def _sample_management_account_client_factory():
                     "list_accounts": accounts_paginator,
                     "list_aws_service_access_for_organization": svc_paginator,
                     "list_organizational_units_for_parent": ou_paginator,
+                    "list_accounts_for_parent": afp_paginator,
+                    "list_policies": lp_paginator,
+                    "list_targets_for_policy": tfp_paginator,
                     "list_delegated_administrators": da_paginator,
                     "list_delegated_services_for_account": ds_paginator,
                 }.get(name, MagicMock())
@@ -133,6 +224,7 @@ def _sample_management_account_client_factory():
                 "Roots": [
                     {
                         "Id": "r-root",
+                        "Name": "Root",
                         "PolicyTypes": [
                             {"Type": "SERVICE_CONTROL_POLICY", "Status": "ENABLED"},
                             {"Type": "TAG_POLICY", "Status": "ENABLED"},
@@ -253,6 +345,40 @@ def _read(path):
         return f.read()
 
 
+def _verify_org_map_outputs(out_dir, org_map):
+    """Check the FR-12 organization map output (returns a problem list)."""
+    problems = []
+    if not org_map:
+        problems.append("wafa-raw.json has no organization_map")
+        return problems
+
+    totals = org_map.get("totals", {})
+    if not totals.get("organizationalUnits") or not totals.get("accounts"):
+        problems.append("organization_map has no OUs or accounts to illustrate")
+    if totals.get("maxDepth", 0) < 2:
+        problems.append("organization_map does not exercise a nested OU")
+    if "RESOURCE_CONTROL_POLICY" not in (org_map.get("policyTypesNotEnabled") or []):
+        problems.append("sample no longer exercises a not-enabled policy type")
+    if org_map.get("policyLookupErrors"):
+        problems.append("sample organization map has policy lookup errors")
+
+    rows = flatten_rows(org_map)
+    if not any(row["kind"] == "ou" and row["policies"] for row in rows):
+        problems.append("sample has no OU-level policy attachment to illustrate")
+    if not any(row["kind"] == "account" and row["policies"] for row in rows):
+        problems.append("sample has no account-level policy attachment")
+
+    # The CSV must match what the production generator produces from the same
+    # map, so the committed file cannot drift from the code.
+    path = os.path.join(out_dir, "wafa-org-map.csv")
+    if not os.path.isfile(path):
+        problems.append("wafa-org-map.csv was not generated")
+    elif _read(path) != generate_org_map_csv(org_map):
+        problems.append("wafa-org-map.csv differs from the generated organization map")
+
+    return problems
+
+
 def _verify_outputs(out_dir):
     """Check the generated sample is complete, consistent, and self-contained."""
     html = _read(os.path.join(out_dir, "wafa-report.html"))
@@ -280,6 +406,8 @@ def _verify_outputs(out_dir):
             "account_info",
             "delegated_administrators",
             "delegated_administrators_error",
+            "organization_map",
+            "organization_map_error",
         ):
             if key not in data or key not in raw or data[key] != raw[key]:
                 problems.append(f"HTML report data {key} differs from wafa-raw.json")
@@ -297,11 +425,16 @@ def _verify_outputs(out_dir):
         if any(line != line.rstrip() for line in text.splitlines()):
             problems.append(f"{name} contains trailing whitespace")
 
+    problems.extend(_verify_org_map_outputs(out_dir, raw.get("organization_map")))
+
     if problems:
         sys.exit("Sample report verification failed:\n- " + "\n- ".join(problems))
+    org_totals = (raw.get("organization_map") or {}).get("totals", {})
     print(
         f"Verified sample: {len(raw['checks'])} checks, maturity level "
-        f"{raw['maturity']['level']}, Cloudscape report UI inlined."
+        f"{raw['maturity']['level']}, Cloudscape report UI inlined, "
+        f"organization map with {org_totals.get('organizationalUnits', 0)} OUs "
+        f"and {org_totals.get('accounts', 0)} accounts."
     )
 
 
@@ -323,6 +456,7 @@ def main():
         "src.checks.identity.boto3.client",
         "src.checks.account_resources.boto3.client",
         "src.checks.delegated_admin.boto3.client",
+        "src.checks.org_map.boto3.client",
     ]
 
     from contextlib import ExitStack

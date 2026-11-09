@@ -210,16 +210,99 @@ def _mock_management_account_boto3():
                     ]
                 }
             ]
-            # list_organizational_units paginator
+            # list_organizational_units paginator, keyed by parent so that the
+            # FR-12 org map walks a finite hierarchy rather than finding the
+            # same OUs beneath every parent.
+            child_ous = {
+                "r-root": [
+                    {"Id": "ou-sec", "Name": "Security"},
+                    {"Id": "ou-wl", "Name": "Workloads"},
+                    {"Id": "ou-infra", "Name": "Infrastructure"},
+                ]
+            }
             ou_paginator = MagicMock()
-            ou_paginator.paginate.return_value = [
-                {
-                    "OrganizationalUnits": [
-                        {"Id": "ou-sec", "Name": "Security"},
-                        {"Id": "ou-wl", "Name": "Workloads"},
-                        {"Id": "ou-infra", "Name": "Infrastructure"},
-                    ]
-                }
+            ou_paginator.paginate.side_effect = lambda ParentId: [
+                {"OrganizationalUnits": child_ous.get(ParentId, [])}
+            ]
+
+            # FR-12: accounts per parent and policies attached per target.
+            accounts_for_parent = {
+                "r-root": [
+                    {"Id": "111111111111", "Name": "Management", "Status": "ACTIVE"}
+                ],
+                "ou-sec": [
+                    {"Id": "222222222222", "Name": "Log Archive", "Status": "ACTIVE"},
+                    {"Id": "333333333333", "Name": "Audit", "Status": "ACTIVE"},
+                ],
+                "ou-wl": [
+                    {
+                        "Id": "444444444444",
+                        "Name": "Workload-Prod",
+                        "Status": "ACTIVE",
+                    }
+                ],
+            }
+            afp_paginator = MagicMock()
+            afp_paginator.paginate.side_effect = lambda ParentId: [
+                {"Accounts": accounts_for_parent.get(ParentId, [])}
+            ]
+
+            # FR-12.3: policies are enumerated by type, then located by target.
+            policies_by_type = {
+                "SERVICE_CONTROL_POLICY": [
+                    {
+                        "Id": "p-FullAWSAccess",
+                        "Name": "FullAWSAccess",
+                        "Type": "SERVICE_CONTROL_POLICY",
+                        "AwsManaged": True,
+                    },
+                    {
+                        "Id": "p-denyroot",
+                        "Name": "DenyRootUserActions",
+                        "Type": "SERVICE_CONTROL_POLICY",
+                        "AwsManaged": False,
+                    },
+                ],
+                "RESOURCE_CONTROL_POLICY": [
+                    {
+                        "Id": "p-perimeter",
+                        "Name": "EnforceDataPerimeter",
+                        "Type": "RESOURCE_CONTROL_POLICY",
+                        "AwsManaged": False,
+                    }
+                ],
+            }
+            lp_paginator = MagicMock()
+            lp_paginator.paginate.side_effect = lambda Filter: [
+                {"Policies": policies_by_type.get(Filter, [])}
+            ]
+            targets_by_policy = {
+                "p-FullAWSAccess": [
+                    {"TargetId": "r-root", "Type": "ROOT", "Name": "Root"}
+                ],
+                "p-denyroot": [
+                    {
+                        "TargetId": "ou-sec",
+                        "Type": "ORGANIZATIONAL_UNIT",
+                        "Name": "Security",
+                    },
+                    {
+                        "TargetId": "444444444444",
+                        "Type": "ACCOUNT",
+                        "Name": "Workload-Prod",
+                    },
+                ],
+                "p-perimeter": [
+                    {
+                        "TargetId": "ou-wl",
+                        "Type": "ORGANIZATIONAL_UNIT",
+                        "Name": "Workloads",
+                    }
+                ],
+            }
+            tfp_paginator = MagicMock()
+            tfp_paginator.paginate.side_effect = lambda PolicyId: [
+                {"Targets": targets_by_policy.get(PolicyId, [])}
             ]
             # delegated admins paginator
             da_paginator = MagicMock()
@@ -247,6 +330,12 @@ def _mock_management_account_boto3():
                     return svc_paginator
                 elif name == "list_organizational_units_for_parent":
                     return ou_paginator
+                elif name == "list_accounts_for_parent":
+                    return afp_paginator
+                elif name == "list_policies":
+                    return lp_paginator
+                elif name == "list_targets_for_policy":
+                    return tfp_paginator
                 elif name == "list_delegated_administrators":
                     return da_paginator
                 elif name == "list_delegated_services_for_account":
@@ -258,6 +347,7 @@ def _mock_management_account_boto3():
                 "Roots": [
                     {
                         "Id": "r-root",
+                        "Name": "Root",
                         "PolicyTypes": [
                             {"Type": "SERVICE_CONTROL_POLICY", "Status": "ENABLED"},
                             {"Type": "TAG_POLICY", "Status": "ENABLED"},
@@ -484,6 +574,7 @@ class TestRunManagementAccount:
     @patch("src.checks.control_tower.boto3.client")
     @patch("src.checks.org_services.boto3.client")
     @patch("src.checks.organization.boto3.client")
+    @patch("src.checks.org_map.boto3.client")
     @patch("src.checks.delegated_admin.boto3.client")
     @patch("src.discovery.regions.boto3.client")
     @patch("src.discovery.account_type.boto3.client")
@@ -492,6 +583,7 @@ class TestRunManagementAccount:
         mock_acct_client,
         mock_regions_client,
         mock_da_client,
+        mock_org_map_client,
         mock_org_client,
         mock_svc_client,
         mock_ct_client,
@@ -508,6 +600,7 @@ class TestRunManagementAccount:
         mock_acct_client.side_effect = factory
         mock_regions_client.side_effect = factory
         mock_da_client.side_effect = factory
+        mock_org_map_client.side_effect = factory
         mock_org_client.side_effect = factory
         mock_svc_client.side_effect = factory
         mock_ct_client.side_effect = factory
@@ -531,6 +624,9 @@ class TestRunManagementAccount:
         assert os.path.exists(os.path.join(output_dir, "wafa-checks.csv"))
         assert os.path.exists(os.path.join(output_dir, "wafa-raw.json"))
 
+        # FR-12: the organization map CSV accompanies the reports
+        assert os.path.exists(os.path.join(output_dir, "wafa-org-map.csv"))
+
         # Verify HTML content
         with open(os.path.join(output_dir, "wafa-report.html")) as f:
             html = f.read()
@@ -551,6 +647,27 @@ class TestRunManagementAccount:
         assert "maturity" in raw
         assert "account_info" in raw
         assert raw["account_info"]["account_id"] == "111111111111"
+
+        # FR-12: the map is genuinely populated, not an error placeholder
+        assert raw["organization_map_error"] is None
+        org_map = raw["organization_map"]
+        assert org_map["organizationId"] == "o-abc123"
+        assert org_map["totals"] == {
+            "organizationalUnits": 3,
+            "accounts": 4,
+            "maxDepth": 1,
+        }
+        assert [ou["name"] for ou in org_map["root"]["children"]] == [
+            "Infrastructure",
+            "Security",
+            "Workloads",
+        ]
+        assert org_map["policyLookupErrors"] == []
+        security = next(
+            ou for ou in org_map["root"]["children"] if ou["id"] == "ou-sec"
+        )
+        assert [a["name"] for a in security["accounts"]] == ["Audit", "Log Archive"]
+        assert [p["name"] for p in security["policies"]] == ["DenyRootUserActions"]
 
     @patch("src.main.parse_args")
     @patch("src.main.detect_partition")
@@ -604,6 +721,7 @@ class TestRunManagementAccount:
     @patch("src.checks.control_tower.boto3.client")
     @patch("src.checks.org_services.boto3.client")
     @patch("src.checks.organization.boto3.client")
+    @patch("src.checks.org_map.boto3.client")
     @patch("src.checks.delegated_admin.boto3.client")
     @patch("src.discovery.regions.boto3.client")
     @patch("src.discovery.account_type.boto3.client")
@@ -612,6 +730,7 @@ class TestRunManagementAccount:
         mock_acct_client,
         mock_regions_client,
         mock_da_client,
+        mock_org_map_client,
         mock_org_client,
         mock_svc_client,
         mock_ct_client,
@@ -627,6 +746,7 @@ class TestRunManagementAccount:
         mock_acct_client.side_effect = factory
         mock_regions_client.side_effect = factory
         mock_da_client.side_effect = factory
+        mock_org_map_client.side_effect = factory
         mock_org_client.side_effect = factory
         mock_svc_client.side_effect = factory
         mock_ct_client.side_effect = factory
@@ -659,6 +779,7 @@ class TestRunManagementAccount:
     @patch("src.checks.control_tower.boto3.client")
     @patch("src.checks.org_services.boto3.client")
     @patch("src.checks.organization.boto3.client")
+    @patch("src.checks.org_map.boto3.client")
     @patch("src.checks.delegated_admin.boto3.client")
     @patch("src.discovery.regions.boto3.client")
     @patch("src.discovery.account_type.boto3.client")
@@ -667,6 +788,7 @@ class TestRunManagementAccount:
         mock_acct_client,
         mock_regions_client,
         mock_da_client,
+        mock_org_map_client,
         mock_org_client,
         mock_svc_client,
         mock_ct_client,
@@ -682,6 +804,7 @@ class TestRunManagementAccount:
         mock_acct_client.side_effect = factory
         mock_regions_client.side_effect = factory
         mock_da_client.side_effect = factory
+        mock_org_map_client.side_effect = factory
         mock_org_client.side_effect = factory
         mock_svc_client.side_effect = factory
         mock_ct_client.side_effect = factory
@@ -694,6 +817,158 @@ class TestRunManagementAccount:
         assert maturity["level"] >= 4
         complete_count = sum(1 for c in checks if c["status"] == "complete")
         assert complete_count >= 30
+
+
+# ============================================================================
+# FR-12 — organization map orchestration
+# ============================================================================
+
+
+class TestOrganizationMapOrchestration:
+    """How the organization map is gated and surfaced on failure."""
+
+    @patch("src.main.parse_args")
+    @patch("src.checks.account_resources.boto3.client")
+    @patch("src.checks.identity.boto3.client")
+    @patch("src.checks.control_tower.boto3.client")
+    @patch("src.checks.org_services.boto3.client")
+    @patch("src.checks.organization.boto3.client")
+    @patch("src.checks.org_map.boto3.client")
+    @patch("src.checks.delegated_admin.boto3.client")
+    @patch("src.discovery.regions.boto3.client")
+    @patch("src.discovery.account_type.boto3.client")
+    def test_account_level_attachments_are_included(
+        self,
+        mock_acct_client,
+        mock_regions_client,
+        mock_da_client,
+        mock_org_map_client,
+        mock_org_client,
+        mock_svc_client,
+        mock_ct_client,
+        mock_id_client,
+        mock_res_client,
+        mock_parse_args,
+        tmp_path,
+    ):
+        """FR-12.3: account attachments need no opt-in with the inverted lookup."""
+        mock_parse_args.return_value = MagicMock(output=str(tmp_path))
+        factory = _mock_management_account_boto3()
+        for mock_client in (
+            mock_acct_client,
+            mock_regions_client,
+            mock_da_client,
+            mock_org_map_client,
+            mock_org_client,
+            mock_svc_client,
+            mock_ct_client,
+            mock_id_client,
+            mock_res_client,
+        ):
+            mock_client.side_effect = factory
+
+        run()
+
+        with open(os.path.join(str(tmp_path), "wafa-raw.json")) as f:
+            raw = json.load(f)
+        org_map = raw["organization_map"]
+
+        def accounts(node):
+            yield from node["accounts"]
+            for child in node["children"]:
+                yield from accounts(child)
+
+        by_id = {a["id"]: a for a in accounts(org_map["root"])}
+        # The workload account has an SCP attached directly to it.
+        assert [p["name"] for p in by_id["444444444444"]["policies"]] == [
+            "DenyRootUserActions"
+        ]
+        # An account with nothing attached still reports an empty list.
+        assert by_id["111111111111"]["policies"] == []
+
+    @patch("src.main.parse_args")
+    @patch("src.checks.account_resources.boto3.client")
+    @patch("src.checks.identity.boto3.client")
+    @patch("src.discovery.regions.boto3.client")
+    @patch("src.discovery.account_type.boto3.client")
+    def test_limited_mode_skips_the_map_and_its_csv(
+        self,
+        mock_acct_client,
+        mock_regions_client,
+        mock_id_client,
+        mock_res_client,
+        mock_parse_args,
+        tmp_path,
+    ):
+        """A member account produces no map rather than an errored one."""
+        output_dir = str(tmp_path)
+        mock_parse_args.return_value = MagicMock(output=output_dir)
+        factory = _mock_member_account_boto3()
+        mock_acct_client.side_effect = factory
+        mock_regions_client.side_effect = factory
+        mock_id_client.side_effect = factory
+        mock_res_client.side_effect = factory
+
+        run()
+
+        with open(os.path.join(output_dir, "wafa-raw.json")) as f:
+            raw = json.load(f)
+        assert raw["organization_map"] is None
+        assert raw["organization_map_error"] is None
+        assert not os.path.exists(os.path.join(output_dir, "wafa-org-map.csv"))
+
+    @patch("src.main.parse_args")
+    @patch("src.main.get_organization_map")
+    @patch("src.checks.account_resources.boto3.client")
+    @patch("src.checks.identity.boto3.client")
+    @patch("src.checks.control_tower.boto3.client")
+    @patch("src.checks.org_services.boto3.client")
+    @patch("src.checks.organization.boto3.client")
+    @patch("src.checks.delegated_admin.boto3.client")
+    @patch("src.discovery.regions.boto3.client")
+    @patch("src.discovery.account_type.boto3.client")
+    def test_map_failure_is_reported_without_blocking_the_assessment(
+        self,
+        mock_acct_client,
+        mock_regions_client,
+        mock_da_client,
+        mock_org_client,
+        mock_svc_client,
+        mock_ct_client,
+        mock_id_client,
+        mock_res_client,
+        mock_get_org_map,
+        mock_parse_args,
+        tmp_path,
+    ):
+        """A map failure surfaces in the report and emits no diagram."""
+        output_dir = str(tmp_path)
+        mock_parse_args.return_value = MagicMock(output=output_dir)
+        mock_get_org_map.return_value = (None, "AccessDeniedException")
+        factory = _mock_management_account_boto3()
+        for mock_client in (
+            mock_acct_client,
+            mock_regions_client,
+            mock_da_client,
+            mock_org_client,
+            mock_svc_client,
+            mock_ct_client,
+            mock_id_client,
+            mock_res_client,
+        ):
+            mock_client.side_effect = factory
+
+        checks, _ = run()
+
+        # The assessment itself still completed.
+        assert len(checks) > 30
+        with open(os.path.join(output_dir, "wafa-raw.json")) as f:
+            raw = json.load(f)
+        assert raw["organization_map"] is None
+        assert raw["organization_map_error"] == "AccessDeniedException"
+        with open(os.path.join(output_dir, "wafa-report.html")) as f:
+            assert "AccessDeniedException" in f.read()
+        assert not os.path.exists(os.path.join(output_dir, "wafa-org-map.csv"))
 
 
 # ============================================================================

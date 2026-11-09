@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useCollection } from "@cloudscape-design/collection-hooks";
 import Alert from "@cloudscape-design/components/alert";
 import AppLayout from "@cloudscape-design/components/app-layout";
+import Badge from "@cloudscape-design/components/badge";
 import BarChart from "@cloudscape-design/components/bar-chart";
 import Box from "@cloudscape-design/components/box";
 import ColumnLayout from "@cloudscape-design/components/column-layout";
@@ -118,6 +119,9 @@ function sectionsFor(data) {
     { id: "capabilities", text: "Capability Coverage" },
     { id: "checks", text: "Check Results" },
   ];
+  if (data.organization_map || data.organization_map_error) {
+    sections.push({ id: "org-map", text: "Organization Map" });
+  }
   if (
     data.delegated_administrators.length ||
     data.delegated_administrators_error
@@ -574,6 +578,222 @@ function DelegatedAdmins({ admins, error }) {
   );
 }
 
+// FR-12: Organization map. Mirrors _POLICY_TYPE_LABELS in
+// src/report/csv_export.py — update both together.
+const POLICY_TYPE_LABELS = {
+  SERVICE_CONTROL_POLICY: "SCP",
+  RESOURCE_CONTROL_POLICY: "RCP",
+  TAG_POLICY: "Tag",
+  BACKUP_POLICY: "Backup",
+  AISERVICES_OPT_OUT_POLICY: "AI opt-out",
+  CHATBOT_POLICY: "Chatbot",
+  DECLARATIVE_POLICY_EC2: "Declarative EC2",
+  SECURITYHUB_POLICY: "Security Hub",
+  INSPECTOR_POLICY: "Inspector",
+  UPGRADE_ROLLOUT_POLICY: "Upgrade rollout",
+  BEDROCK_POLICY: "Bedrock",
+  S3_POLICY: "S3",
+  NETWORK_SECURITY_DIRECTOR_POLICY: "Network security",
+  GUARDDUTY_POLICY: "GuardDuty",
+};
+
+const POLICY_BADGE_COLOR = {
+  SERVICE_CONTROL_POLICY: "blue",
+  RESOURCE_CONTROL_POLICY: "green",
+};
+
+const ORG_ROW_TYPE_LABELS = { root: "Root", ou: "OU", account: "Account" };
+
+function policyTypeLabel(policyType) {
+  return POLICY_TYPE_LABELS[policyType] || String(policyType || "").replace(/_/g, " ");
+}
+
+function orgNodeNote(node) {
+  return [node.accountsError, node.childrenError].filter(Boolean).join("; ");
+}
+
+/**
+ * Flatten the organization tree into display rows, parents before children.
+ * Mirrors flatten_rows() in src/checks/org_map.py.
+ */
+function flattenOrgRows(map) {
+  if (!map || !map.root) {
+    return [];
+  }
+  const rows = [];
+  const visit = (node) => {
+    const depth = node.depth || 0;
+    rows.push({
+      key: `${node.type}:${node.id}`,
+      kind: node.type === "ROOT" ? "root" : "ou",
+      name: node.name,
+      id: node.id,
+      depth,
+      path: node.path,
+      policies: node.policies || [],
+      status: "",
+      note: orgNodeNote(node),
+    });
+    (node.accounts || []).forEach((account) => {
+      rows.push({
+        key: `ACCOUNT:${account.id}`,
+        kind: "account",
+        name: account.name,
+        id: account.id,
+        depth: depth + 1,
+        path: node.path,
+        policies: account.policies || [],
+        status: account.status || "",
+        note: "",
+      });
+    });
+    (node.children || []).forEach(visit);
+  };
+  visit(map.root);
+  return rows;
+}
+
+function OrganizationMap({ map, error }) {
+  const rows = useMemo(() => flattenOrgRows(map), [map]);
+  const totals = (map && map.totals) || {};
+  const notEnabled = (map && map.policyTypesNotEnabled) || [];
+  const policyErrors = (map && map.policyLookupErrors) || [];
+
+  return (
+    <SpaceBetween size="m">
+      {error && (
+        <Alert type="warning" header="Organization map could not be built">
+          {error}
+        </Alert>
+      )}
+      {map && (
+        <Container
+          header={
+            <Header
+              variant="h2"
+              counter={`(${totals.organizationalUnits || 0} OUs, ${
+                totals.accounts || 0
+              } accounts)`}
+              description="Policy columns list only policies attached directly at that level. Accounts and OUs also inherit policies from their parents."
+            >
+              Organization Map
+            </Header>
+          }
+        >
+          <SpaceBetween size="l">
+            <KeyValuePairs
+              columns={4}
+              items={[
+                { label: "Organization ID", value: map.organizationId || "—" },
+                {
+                  label: "Organizational units",
+                  value: totals.organizationalUnits || 0,
+                },
+                { label: "Accounts", value: totals.accounts || 0 },
+                { label: "Deepest OU nesting", value: totals.maxDepth || 0 },
+              ]}
+            />
+            {notEnabled.length > 0 && (
+              <Alert type="info" header="Guardrail policy types not enabled">
+                {notEnabled.map(policyTypeLabel).join(" and ")} not enabled in this
+                organization, so no policies of {notEnabled.length > 1 ? "those types" : "that type"} can be attached at any level.
+              </Alert>
+            )}
+            {map.depthTruncated && (
+              <Alert type="warning" header="OU hierarchy not fully walked">
+                The hierarchy is nested deeper than the levels this map walks, so
+                some OUs and accounts are not listed.
+              </Alert>
+            )}
+            {policyErrors.length > 0 && (
+              <Alert
+                type="warning"
+                header="Attached policies may be incomplete"
+              >
+                <SpaceBetween size="xxs">
+                  {policyErrors.map((failure) => (
+                    <Box key={failure.scope}>
+                      {failure.scope}: {failure.error}
+                    </Box>
+                  ))}
+                </SpaceBetween>
+              </Alert>
+            )}
+            <Table
+              variant="embedded"
+              ariaLabels={{ tableLabel: "Organization structure" }}
+              items={rows}
+              wrapLines
+              trackBy="key"
+              columnDefinitions={[
+                {
+                  id: "structure",
+                  header: "Structure",
+                  isRowHeader: true,
+                  cell: (row) => (
+                    <div style={{ marginLeft: row.depth * 18 }}>
+                      <SpaceBetween size="xxs">
+                        <Box variant={row.kind === "account" ? "span" : "strong"}>
+                          {row.name || "(unnamed)"}
+                        </Box>
+                        {row.note && (
+                          <StatusIndicator type="warning">{row.note}</StatusIndicator>
+                        )}
+                      </SpaceBetween>
+                    </div>
+                  ),
+                },
+                {
+                  id: "type",
+                  header: "Type",
+                  width: 110,
+                  cell: (row) => ORG_ROW_TYPE_LABELS[row.kind] || row.kind,
+                },
+                { id: "id", header: "ID", cell: (row) => row.id || "—" },
+                {
+                  id: "status",
+                  header: "Status",
+                  cell: (row) => {
+                    if (row.kind !== "account") {
+                      return "—";
+                    }
+                    return row.status === "ACTIVE" ? (
+                      <StatusIndicator type="success">Active</StatusIndicator>
+                    ) : (
+                      <StatusIndicator type="warning">
+                        {row.status || "Unknown"}
+                      </StatusIndicator>
+                    );
+                  },
+                },
+                {
+                  id: "policies",
+                  header: "Directly attached policies",
+                  cell: (row) =>
+                    row.policies.length ? (
+                      <SpaceBetween size="xxs" direction="horizontal">
+                        {row.policies.map((policy) => (
+                          <Badge
+                            key={`${policy.type}:${policy.id}`}
+                            color={POLICY_BADGE_COLOR[policy.type] || "grey"}
+                          >
+                            {policyTypeLabel(policy.type)}: {policy.name}
+                          </Badge>
+                        ))}
+                      </SpaceBetween>
+                    ) : (
+                      "—"
+                    ),
+                },
+              ]}
+            />
+          </SpaceBetween>
+        </Container>
+      )}
+    </SpaceBetween>
+  );
+}
+
 function Methodology({ model }) {
   return (
     <Container header={<Header variant="h2">Maturity Methodology</Header>}>
@@ -708,6 +928,14 @@ export default function App({ data }) {
               <Section id="checks">
                 <CheckResults checks={data.checks} summary={data.summary} />
               </Section>
+              {(data.organization_map || data.organization_map_error) && (
+                <Section id="org-map">
+                  <OrganizationMap
+                    map={data.organization_map}
+                    error={data.organization_map_error}
+                  />
+                </Section>
+              )}
               {(data.delegated_administrators.length > 0 ||
                 data.delegated_administrators_error) && (
                 <Section id="delegated-admins">

@@ -11,6 +11,7 @@ The report contains:
 - Assessment overview
 - Check results table with filtering
 - Delegated administrators table
+- Organization and OU account map with attached policies (FR-12)
 - Light/dark mode toggle
 """
 
@@ -114,7 +115,13 @@ def _load_asset(name):
 
 
 def _build_report_data(
-    checks, maturity, delegated_admins, account_info, delegated_admins_error=None
+    checks,
+    maturity,
+    delegated_admins,
+    account_info,
+    delegated_admins_error=None,
+    org_map=None,
+    org_map_error=None,
 ):
     """Assemble the JSON payload rendered by the Cloudscape report UI."""
     axis_scores = _calculate_axis_scores(checks)
@@ -128,6 +135,8 @@ def _build_report_data(
         "maturity": maturity,
         "delegated_administrators": delegated_admins,
         "delegated_administrators_error": delegated_admins_error,
+        "organization_map": org_map,
+        "organization_map_error": org_map_error,
         "account_info": account_info,
         "axis_scores": [
             {
@@ -154,6 +163,8 @@ def generate_html(
     delegated_admins=None,
     account_info=None,
     delegated_admins_error=None,
+    org_map=None,
+    org_map_error=None,
 ):
     """Generate the interactive HTML report.
 
@@ -164,6 +175,8 @@ def generate_html(
         account_info: account info dict (optional)
         delegated_admins_error: why delegated admins could not be fully
             listed (optional)
+        org_map: organization and OU account map dict (optional, FR-12)
+        org_map_error: why the organization map could not be built (optional)
 
     Returns:
         str: Complete HTML document as string
@@ -187,7 +200,13 @@ def generate_html(
         # tojson escapes <, >, &, and ' as Unicode escapes, so AWS-provided
         # text cannot break out of the JSON data element.
         report_data=_build_report_data(
-            checks, maturity, delegated_admins, account_info, delegated_admins_error
+            checks,
+            maturity,
+            delegated_admins,
+            account_info,
+            delegated_admins_error,
+            org_map,
+            org_map_error,
         ),
         report_css=_load_asset("report-ui.css"),
         report_js=_load_asset("report-ui.js"),

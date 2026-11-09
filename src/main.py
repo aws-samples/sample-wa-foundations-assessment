@@ -20,9 +20,10 @@ from src.checks import (
 )
 from src.checks.delegated_admin import get_delegated_administrators
 from src.checks.maturity import calculate_maturity_level
+from src.checks.org_map import MAX_OU_DEPTH, flatten_rows, get_organization_map
 from src.discovery.account_type import detect_account_type, detect_partition
 from src.discovery.regions import discover_regions
-from src.report.csv_export import generate_csv
+from src.report.csv_export import generate_csv, generate_org_map_csv
 from src.report.html_report import generate_html
 
 
@@ -78,6 +79,32 @@ def print_summary(checks, maturity):
     print("-" * 80)
 
 
+def print_org_map_summary(org_map, org_map_error):
+    """Print a one-line console summary of the organization map (FR-12.6)."""
+    if org_map_error:
+        print(f"  Organization map: could not be built — {org_map_error}")
+        return
+    if not org_map:
+        return
+    totals = org_map.get("totals", {})
+    attached = sum(len(row.get("policies") or []) for row in flatten_rows(org_map))
+    print(
+        f"  Organization map: {totals.get('organizationalUnits', 0)} OUs, "
+        f"{totals.get('accounts', 0)} accounts, "
+        f"{attached} direct policy attachments"
+    )
+    not_enabled = org_map.get("policyTypesNotEnabled") or []
+    if not_enabled:
+        print(f"    Policy types not enabled: {', '.join(not_enabled)}")
+    for failure in org_map.get("policyLookupErrors") or []:
+        print(
+            f"    Attachments may be incomplete for {failure['scope']}: "
+            f"{failure['error']}"
+        )
+    if org_map.get("depthTruncated"):
+        print(f"    Note: OU nesting deeper than {MAX_OU_DEPTH} levels was not walked")
+
+
 def upload_to_s3(output_path, account_id, files):
     """Upload report files to S3 if output is an S3 URI."""
     # Parse S3 URI
@@ -129,6 +156,8 @@ def run():
     checks = []
     delegated_admins = []
     delegated_admins_error = None
+    org_map = None
+    org_map_error = None
 
     # FR-3.1, FR-3.2: Always run
     checks.append(organization.check_org_exists())
@@ -167,6 +196,10 @@ def run():
         # FR-9: Delegated administrators (informational)
         delegated_admins, delegated_admins_error = get_delegated_administrators()
 
+        # FR-12: Organization and OU account map (informational)
+        org_map, org_map_error = get_organization_map()
+        print_org_map_summary(org_map, org_map_error)
+
     else:
         print("Running LIMITED assessment (non-management account)...")
         # FR-2.4: Limited checks for non-management accounts
@@ -198,6 +231,8 @@ def run():
         delegated_admins,
         account_info,
         delegated_admins_error=delegated_admins_error,
+        org_map=org_map,
+        org_map_error=org_map_error,
     )
     csv_content = generate_csv(checks)
     raw_json = json.dumps(
@@ -207,33 +242,40 @@ def run():
             "checks": checks,
             "delegated_administrators": delegated_admins,
             "delegated_administrators_error": delegated_admins_error,
+            "organization_map": org_map,
+            "organization_map_error": org_map_error,
         },
         indent=2,
         default=str,
     )
 
+    report_files = [
+        ("wafa-report.html", html_content, "text/html"),
+        ("wafa-checks.csv", csv_content, "text/csv"),
+        ("wafa-raw.json", raw_json, "application/json"),
+    ]
+
+    # FR-12.4: organization map CSV, only when there is a map.
+    org_map_csv = generate_org_map_csv(org_map)
+    if org_map_csv:
+        report_files.append(("wafa-org-map.csv", org_map_csv, "text/csv"))
+
     # 7. Output reports
     if args.output.startswith("s3://"):
         print("\nUploading reports to S3...")
-        upload_to_s3(
-            args.output,
-            account_info["account_id"],
-            [
-                ("wafa-report.html", html_content, "text/html"),
-                ("wafa-checks.csv", csv_content, "text/csv"),
-                ("wafa-raw.json", raw_json, "application/json"),
-            ],
-        )
+        upload_to_s3(args.output, account_info["account_id"], report_files)
     else:
         output_dir = args.output
         os.makedirs(output_dir, exist_ok=True)
-        with open(os.path.join(output_dir, "wafa-report.html"), "w") as f:
-            f.write(html_content)
-        with open(os.path.join(output_dir, "wafa-checks.csv"), "w") as f:
-            f.write(csv_content)
-        with open(os.path.join(output_dir, "wafa-raw.json"), "w") as f:
-            f.write(raw_json)
+        for filename, content, _ in report_files:
+            # Explicit UTF-8: the reports and diagrams contain non-ASCII text,
+            # which would fail to write on a host with a C/POSIX locale.
+            path = os.path.join(output_dir, filename)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
         print(f"\nReports saved to: {output_dir}/")
+        for filename, _, _ in report_files:
+            print(f"  {filename}")
 
     print("\nWAFA Assessment complete.")
     return checks, maturity

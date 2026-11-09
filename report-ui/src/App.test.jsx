@@ -16,6 +16,86 @@ function check(name, status, extra = {}) {
   };
 }
 
+// The organization map's first column is the only markup indented by depth, so
+// selecting on that inline margin scopes queries to the structure cells and
+// avoids matching the same name in the Type column.
+function orgStructureRows(section) {
+  return [...section.querySelectorAll("div[style]")]
+    .filter((element) => /^\d+px$/.test(element.style.marginLeft))
+    .map((element) => ({
+      label: element.textContent.trim(),
+      indent: element.style.marginLeft,
+    }));
+}
+
+function orgMap(overrides = {}) {
+  return {
+    organizationId: "o-example12345",
+    managementAccountId: "111111111111",
+    enabledPolicyTypes: ["SERVICE_CONTROL_POLICY"],
+    policyTypesNotEnabled: ["RESOURCE_CONTROL_POLICY"],
+    policyLookupErrors: [],
+    totals: { organizationalUnits: 1, accounts: 2, maxDepth: 1 },
+    root: {
+      id: "r-root",
+      name: "Root",
+      type: "ROOT",
+      path: "Root",
+      depth: 0,
+      policies: [
+        {
+          id: "p-full",
+          name: "FullAWSAccess",
+          type: "SERVICE_CONTROL_POLICY",
+          awsManaged: true,
+        },
+      ],
+      accounts: [
+        {
+          id: "111111111111",
+          name: "Management",
+          status: "ACTIVE",
+          policies: [],
+        },
+      ],
+      children: [
+        {
+          id: "ou-sec",
+          name: "Security",
+          type: "ORGANIZATIONAL_UNIT",
+          path: "Root/Security",
+          depth: 1,
+          policies: [
+            {
+              id: "p-deny",
+              name: "DenyRootUser",
+              type: "SERVICE_CONTROL_POLICY",
+              awsManaged: false,
+            },
+          ],
+          accounts: [
+            {
+              id: "333333333333",
+              name: "Audit",
+              status: "SUSPENDED",
+              policies: [
+                {
+                  id: "p-acct",
+                  name: "AccountGuardrail",
+                  type: "SERVICE_CONTROL_POLICY",
+                  awsManaged: false,
+                },
+              ],
+            },
+          ],
+          children: [],
+        },
+      ],
+    },
+    ...overrides,
+  };
+}
+
 function reportData(overrides = {}) {
   return {
     checks: [
@@ -81,6 +161,8 @@ function reportData(overrides = {}) {
       { accountId: "222222222222", accountName: "Security", services: ["guardduty.amazonaws.com"] },
     ],
     delegated_administrators_error: null,
+    organization_map: orgMap(),
+    organization_map_error: null,
     account_info: {
       account_id: "111111111111",
       account_type: "management",
@@ -273,6 +355,113 @@ describe("report UI", () => {
     const section = within(container.querySelector("#delegated-admins"));
     expect(section.getByText("222222222222")).toBeTruthy();
     expect(section.getByText("guardduty.amazonaws.com")).toBeTruthy();
+  });
+
+  it("maps the OU hierarchy, account placement, and attached policies", () => {
+    const { container } = renderReport();
+    const section = container.querySelector("#org-map");
+    const text = section.textContent;
+    expect(text).toContain("o-example12345");
+    // Root, its account, the child OU, and that OU's account.
+    expect(orgStructureRows(section).map((row) => row.label)).toEqual([
+      "Root",
+      "Management",
+      "Security",
+      "Audit",
+    ]);
+    // Directly attached policies are labelled by type.
+    expect(text).toContain("SCP: FullAWSAccess");
+    expect(text).toContain("SCP: DenyRootUser");
+    // A suspended account is surfaced rather than silently dropped.
+    expect(text).toContain("SUSPENDED");
+  });
+
+  it("indents the organization map by hierarchy depth", () => {
+    const { container } = renderReport();
+    const rows = orgStructureRows(container.querySelector("#org-map"));
+    // Accounts sit one level below the OU that contains them, so Management
+    // (in Root) and the Security OU share an indent, and Audit sits deeper.
+    expect(rows).toEqual([
+      { label: "Root", indent: "0px" },
+      { label: "Management", indent: "18px" },
+      { label: "Security", indent: "18px" },
+      { label: "Audit", indent: "36px" },
+    ]);
+  });
+
+  it("notes guardrail policy types that are not enabled", () => {
+    const { container } = renderReport();
+    expect(container.querySelector("#org-map").textContent).toContain(
+      "RCP not enabled in this organization",
+    );
+  });
+
+  it("shows account-level policy attachments", () => {
+    const { container } = renderReport();
+    expect(container.querySelector("#org-map").textContent).toContain(
+      "SCP: AccountGuardrail",
+    );
+  });
+
+  it("warns when policy attachments could not be fully listed", () => {
+    const { container } = renderReport({
+      organization_map: orgMap({
+        policyLookupErrors: [
+          { scope: "INSPECTOR_POLICY", error: "TooManyRequestsException" },
+        ],
+      }),
+    });
+    const section = container.querySelector("#org-map").textContent;
+    expect(section).toContain("Attached policies may be incomplete");
+    expect(section).toContain("INSPECTOR_POLICY");
+    expect(section).toContain("TooManyRequestsException");
+  });
+
+  it("warns when the OU hierarchy was not fully walked", () => {
+    const { container } = renderReport({
+      organization_map: orgMap({ depthTruncated: true }),
+    });
+    expect(container.querySelector("#org-map").textContent).toContain(
+      "nested deeper than the levels this map walks",
+    );
+  });
+
+  it("surfaces per-node organization map errors", () => {
+    const map = orgMap();
+    map.root.children[0].accountsError = "AccessDenied listing accounts";
+    const { container } = renderReport({ organization_map: map });
+    expect(container.querySelector("#org-map").textContent).toContain(
+      "AccessDenied listing accounts",
+    );
+  });
+
+  it("shows the organization map section when the map could not be built", () => {
+    const { container } = renderReport({
+      organization_map: null,
+      organization_map_error: "AccessDeniedException",
+    });
+    const section = container.querySelector("#org-map");
+    expect(section).not.toBeNull();
+    expect(section.textContent).toContain("could not be built");
+    expect(section.textContent).toContain("AccessDeniedException");
+  });
+
+  it("omits the organization map section in limited mode", () => {
+    const { container, wrapper } = renderReport({
+      organization_map: null,
+      organization_map_error: null,
+    });
+    expect(container.querySelector("#org-map")).toBeNull();
+    expect(wrapper.findSideNavigation().findLinkByHref("#org-map")).toBeNull();
+  });
+
+  it("renders untrusted OU names as text", () => {
+    const map = orgMap();
+    map.root.children[0].name = "<script>alert(1)</script>";
+    const { container } = renderReport({ organization_map: map });
+    const section = container.querySelector("#org-map");
+    expect(section.querySelector("script")).toBeNull();
+    expect(section.textContent).toContain("<script>alert(1)</script>");
   });
 
   it("links to the GitHub repository in the footer", () => {
