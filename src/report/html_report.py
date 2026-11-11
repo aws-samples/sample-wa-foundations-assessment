@@ -21,6 +21,9 @@ from pathlib import Path
 from jinja2 import BaseLoader, select_autoescape
 from jinja2.sandbox import SandboxedEnvironment
 
+from src.checks.org_map import flatten_rows
+from src.report.policy_labels import labelled_policies, policy_type_label
+
 ASSETS_DIR = Path(__file__).parent / "assets"
 
 # FR-10.1: Capability chart axis mapping — check names to capability axes
@@ -114,6 +117,22 @@ def _load_asset(name):
     return (ASSETS_DIR / name).read_text(encoding="utf-8")
 
 
+def _org_map_rows(org_map):
+    """Return display rows for the organization map, with policy labels.
+
+    ``key`` is a stable row identity for the report table, so the UI does not
+    have to construct one.
+    """
+    return [
+        dict(
+            row,
+            key=f"{row.get('kind', '')}:{row.get('id', '')}",
+            policies=labelled_policies(row.get("policies")),
+        )
+        for row in flatten_rows(org_map)
+    ]
+
+
 def _build_report_data(
     checks,
     maturity,
@@ -137,6 +156,16 @@ def _build_report_data(
         "delegated_administrators_error": delegated_admins_error,
         "organization_map": org_map,
         "organization_map_error": org_map_error,
+        # Flattened in Python so the UI renders structured data instead of
+        # re-deriving the hierarchy and policy labels in JavaScript, which
+        # would let the CSV and the HTML from one run disagree.
+        "organization_map_rows": _org_map_rows(org_map),
+        # Labels for the guardrail policy types that are not enabled, so the
+        # UI never derives a label itself.
+        "organization_map_not_enabled_labels": [
+            policy_type_label(policy_type)
+            for policy_type in (org_map or {}).get("policyTypesNotEnabled") or []
+        ],
         "account_info": account_info,
         "axis_scores": [
             {

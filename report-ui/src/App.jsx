@@ -578,25 +578,10 @@ function DelegatedAdmins({ admins, error }) {
   );
 }
 
-// FR-12: Organization map. Mirrors _POLICY_TYPE_LABELS in
-// src/report/csv_export.py — update both together.
-const POLICY_TYPE_LABELS = {
-  SERVICE_CONTROL_POLICY: "SCP",
-  RESOURCE_CONTROL_POLICY: "RCP",
-  TAG_POLICY: "Tag",
-  BACKUP_POLICY: "Backup",
-  AISERVICES_OPT_OUT_POLICY: "AI opt-out",
-  CHATBOT_POLICY: "Chatbot",
-  DECLARATIVE_POLICY_EC2: "Declarative EC2",
-  SECURITYHUB_POLICY: "Security Hub",
-  INSPECTOR_POLICY: "Inspector",
-  UPGRADE_ROLLOUT_POLICY: "Upgrade rollout",
-  BEDROCK_POLICY: "Bedrock",
-  S3_POLICY: "S3",
-  NETWORK_SECURITY_DIRECTOR_POLICY: "Network security",
-  GUARDDUTY_POLICY: "GuardDuty",
-};
-
+// FR-12: Organization map. Rows and policy labels arrive finished in the
+// report payload from src/checks/org_map.py and src/report/policy_labels.py,
+// so this component renders data rather than re-deriving it. Only the badge
+// colour, which is pure presentation, is decided here.
 const POLICY_BADGE_COLOR = {
   SERVICE_CONTROL_POLICY: "blue",
   RESOURCE_CONTROL_POLICY: "green",
@@ -604,59 +589,8 @@ const POLICY_BADGE_COLOR = {
 
 const ORG_ROW_TYPE_LABELS = { root: "Root", ou: "OU", account: "Account" };
 
-function policyTypeLabel(policyType) {
-  return POLICY_TYPE_LABELS[policyType] || String(policyType || "").replace(/_/g, " ");
-}
-
-function orgNodeNote(node) {
-  return [node.accountsError, node.childrenError].filter(Boolean).join("; ");
-}
-
-/**
- * Flatten the organization tree into display rows, parents before children.
- * Mirrors flatten_rows() in src/checks/org_map.py.
- */
-function flattenOrgRows(map) {
-  if (!map || !map.root) {
-    return [];
-  }
-  const rows = [];
-  const visit = (node) => {
-    const depth = node.depth || 0;
-    rows.push({
-      key: `${node.type}:${node.id}`,
-      kind: node.type === "ROOT" ? "root" : "ou",
-      name: node.name,
-      id: node.id,
-      depth,
-      path: node.path,
-      policies: node.policies || [],
-      status: "",
-      note: orgNodeNote(node),
-    });
-    (node.accounts || []).forEach((account) => {
-      rows.push({
-        key: `ACCOUNT:${account.id}`,
-        kind: "account",
-        name: account.name,
-        id: account.id,
-        depth: depth + 1,
-        path: node.path,
-        policies: account.policies || [],
-        status: account.status || "",
-        note: "",
-      });
-    });
-    (node.children || []).forEach(visit);
-  };
-  visit(map.root);
-  return rows;
-}
-
-function OrganizationMap({ map, error }) {
-  const rows = useMemo(() => flattenOrgRows(map), [map]);
+function OrganizationMap({ map, rows, notEnabled, error }) {
   const totals = (map && map.totals) || {};
-  const notEnabled = (map && map.policyTypesNotEnabled) || [];
   const policyErrors = (map && map.policyLookupErrors) || [];
 
   return (
@@ -695,7 +629,7 @@ function OrganizationMap({ map, error }) {
             />
             {notEnabled.length > 0 && (
               <Alert type="info" header="Guardrail policy types not enabled">
-                {notEnabled.map(policyTypeLabel).join(" and ")} not enabled in this
+                {notEnabled.join(" and ")} not enabled in this
                 organization, so no policies of {notEnabled.length > 1 ? "those types" : "that type"} can be attached at any level.
               </Alert>
             )}
@@ -777,7 +711,7 @@ function OrganizationMap({ map, error }) {
                             key={`${policy.type}:${policy.id}`}
                             color={POLICY_BADGE_COLOR[policy.type] || "grey"}
                           >
-                            {policyTypeLabel(policy.type)}: {policy.name}
+                            {policy.typeLabel}: {policy.name}
                           </Badge>
                         ))}
                       </SpaceBetween>
@@ -932,6 +866,8 @@ export default function App({ data }) {
                 <Section id="org-map">
                   <OrganizationMap
                     map={data.organization_map}
+                    rows={data.organization_map_rows || []}
+                    notEnabled={data.organization_map_not_enabled_labels || []}
                     error={data.organization_map_error}
                   />
                 </Section>

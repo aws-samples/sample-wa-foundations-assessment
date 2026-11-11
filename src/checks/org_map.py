@@ -17,16 +17,24 @@ Policy attachments are collected by enumerating the organization's policies and
 asking where each one is attached (``ListPolicies`` then
 ``ListTargetsForPolicy``), rather than asking every target which policies it
 has. Both report the same thing — only *direct* attachments, never ones
-inherited from a parent — but the cost differs sharply:
+inherited from a parent — but the attachment lookups cost less:
 
-- per-target lookups cost ``targets x enabled policy types``, which grows with
-  the size of the organization and throttles on large ones
-- enumerating policies costs ``enabled policy types + policies``, which grows
-  only with the number of policies
+- per-target lookups cost ``targets x enabled policy types``, so every
+  additional OU multiplies the call count by the number of policy types
+- enumerating policies costs ``enabled policy types`` calls plus one call per
+  policy, *plus paging* through that policy's targets
 
-A 500-OU organization with 50 policies needs roughly 59 calls this way instead
-of several thousand. Account-level attachments also come back in the same
-responses, so they need no extra calls and are always included.
+The second term matters: a policy attached to every target, as
+``FullAWSAccess`` usually is, pages across all of them, so its own lookup
+scales with the size of the organization even though the others do not. Treat
+``types + policies`` as a floor, not the total.
+
+The OU walk itself is unchanged and still costs two calls per OU
+(``ListOrganizationalUnitsForParent`` and ``ListAccountsForParent``), so on a
+large organization most of the runtime is the walk, not the policy lookups.
+
+Account-level attachments come back in the same responses as the OU ones, so
+they need no extra calls and are always included.
 
 An empty policy list for a level means nothing is attached *there*; that level
 may still inherit a policy from an ancestor.
@@ -63,6 +71,16 @@ _POLICY_TYPE_UNAVAILABLE_CODES = frozenset(
         "UnsupportedAPIEndpointException",
     }
 )
+
+
+def _path_segment(name):
+    """Escape the path separator so an OU name containing "/" stays unambiguous.
+
+    AWS permits "/" in an OU name, so an OU literally named "Prod/EU" would
+    otherwise produce the same path as an OU "EU" nested inside an OU "Prod".
+    A backslash is escaped first so the escaping itself is reversible.
+    """
+    return (name or "").replace("\\", "\\\\").replace("/", "\\/")
 
 
 def _account_entry(account):
@@ -134,7 +152,15 @@ def _build_node(client, node_id, name, node_type, path, depth, stats):
         # Children exist beyond the documented nesting limit, so this walk
         # stopped short: say so instead of implying the map is complete. An OU
         # sitting exactly at the limit has no children, which is not truncation.
+        # The note is recorded on the node that was cut off, so the CSV and the
+        # console name the exact place the map stops rather than only flagging
+        # it once for the whole organization.
         stats["depth_truncated"] = True
+        node["childrenTruncated"] = (
+            f"Walk stopped at the {MAX_OU_DEPTH}-level nesting limit; "
+            f"{len(child_ous)} child OU(s) and anything below them "
+            "are not listed"
+        )
         return node
 
     for ou in sorted(child_ous, key=lambda o: (o.get("Name") or "").lower()):
@@ -146,7 +172,7 @@ def _build_node(client, node_id, name, node_type, path, depth, stats):
                 ou.get("Id", ""),
                 ou_name,
                 "ORGANIZATIONAL_UNIT",
-                f"{path}/{ou_name}",
+                f"{path}/{_path_segment(ou_name)}",
                 depth + 1,
                 stats,
             )
@@ -209,9 +235,16 @@ def flatten_rows(org_map, include_accounts=True):
 
 
 def _node_note(node):
-    """Join the per-node error messages recorded while building the map."""
+    """Join the per-node warnings recorded while building the map.
+
+    Covers both failures to read (``accountsError``, ``childrenError``) and a
+    deliberate stop at the nesting limit (``childrenTruncated``), so every
+    reason a node is incomplete surfaces in the same place.
+    """
     notes = [
-        node.get(key) for key in ("accountsError", "childrenError") if node.get(key)
+        node.get(key)
+        for key in ("accountsError", "childrenError", "childrenTruncated")
+        if node.get(key)
     ]
     return "; ".join(notes)
 
@@ -349,7 +382,13 @@ def get_organization_map():
 
         root_name = root.get("Name") or "Root"
         root_node = _build_node(
-            client, root.get("Id", ""), root_name, "ROOT", root_name, 0, stats
+            client,
+            root.get("Id", ""),
+            root_name,
+            "ROOT",
+            _path_segment(root_name),
+            0,
+            stats,
         )
 
         policy_errors = _attach_policies(client, root_node, enabled_policy_types)

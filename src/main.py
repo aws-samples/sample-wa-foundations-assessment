@@ -20,7 +20,7 @@ from src.checks import (
 )
 from src.checks.delegated_admin import get_delegated_administrators
 from src.checks.maturity import calculate_maturity_level
-from src.checks.org_map import MAX_OU_DEPTH, flatten_rows, get_organization_map
+from src.checks.org_map import flatten_rows, get_organization_map
 from src.discovery.account_type import detect_account_type, detect_partition
 from src.discovery.regions import discover_regions
 from src.report.csv_export import generate_csv, generate_org_map_csv
@@ -80,14 +80,20 @@ def print_summary(checks, maturity):
 
 
 def print_org_map_summary(org_map, org_map_error):
-    """Print a one-line console summary of the organization map (FR-12.6)."""
+    """Print a console summary of the organization map (FR-12.5).
+
+    Every reason the map could be incomplete is printed, not just the totals.
+    The counts alone would otherwise read as a complete, smaller organization
+    when an OU's accounts or children could not be listed.
+    """
     if org_map_error:
         print(f"  Organization map: could not be built — {org_map_error}")
         return
     if not org_map:
         return
+    rows = flatten_rows(org_map)
     totals = org_map.get("totals", {})
-    attached = sum(len(row.get("policies") or []) for row in flatten_rows(org_map))
+    attached = sum(len(row.get("policies") or []) for row in rows)
     print(
         f"  Organization map: {totals.get('organizationalUnits', 0)} OUs, "
         f"{totals.get('accounts', 0)} accounts, "
@@ -101,8 +107,12 @@ def print_org_map_summary(org_map, org_map_error):
             f"    Attachments may be incomplete for {failure['scope']}: "
             f"{failure['error']}"
         )
-    if org_map.get("depthTruncated"):
-        print(f"    Note: OU nesting deeper than {MAX_OU_DEPTH} levels was not walked")
+    # Per-node warnings: a denied ListAccountsForParent, an unreadable child
+    # OU, or a walk stopped at the nesting limit. Each names the node it
+    # applies to, so the gap is locatable rather than just flagged.
+    for row in rows:
+        if row.get("note"):
+            print(f"    {row.get('path') or row.get('name')}: {row['note']}")
 
 
 def upload_to_s3(output_path, account_id, files):
@@ -267,11 +277,16 @@ def run():
     else:
         output_dir = args.output
         os.makedirs(output_dir, exist_ok=True)
-        for filename, content, _ in report_files:
-            # Explicit UTF-8: the reports and diagrams contain non-ASCII text,
-            # which would fail to write on a host with a C/POSIX locale.
+        for filename, content, content_type in report_files:
+            # Explicit UTF-8: the reports contain non-ASCII text, which would
+            # fail to write on a host with a C/POSIX locale.
+            #
+            # CSV content already carries the \r\n line endings csv.writer
+            # produces, so newline="" stops the text layer translating them
+            # into \r\r\n on Windows.
+            newline = "" if content_type.startswith("text/csv") else None
             path = os.path.join(output_dir, filename)
-            with open(path, "w", encoding="utf-8") as f:
+            with open(path, "w", encoding="utf-8", newline=newline) as f:
                 f.write(content)
         print(f"\nReports saved to: {output_dir}/")
         for filename, _, _ in report_files:

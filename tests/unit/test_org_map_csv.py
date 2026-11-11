@@ -3,7 +3,10 @@
 import csv
 import io
 
-from src.report.csv_export import generate_org_map_csv, policy_type_label
+import pytest
+
+from src.report.csv_export import generate_csv, generate_org_map_csv
+from src.report.policy_labels import policy_type_label
 
 
 def account(account_id, name, status="ACTIVE", policies=None):
@@ -171,3 +174,86 @@ class TestOrgMapCsv:
     def test_empty_without_a_map(self):
         assert generate_org_map_csv(None) == ""
         assert generate_org_map_csv({}) == ""
+
+
+class TestFormulaInjection:
+    """OU and account names are AWS-provided and land in spreadsheet cells."""
+
+    @pytest.mark.parametrize("trigger", ["=", "+", "-", "@", "\t", "\r"])
+    def test_neutralizes_a_leading_formula_character_in_a_name(self, trigger):
+        root = org_map()["root"]
+        root["name"] = f"{trigger}cmd|' /c calc'!A0"
+        name_cell = rows_for(org_map(root=root))[1][2]
+        assert name_cell.startswith("'")
+        # The original text is preserved, just no longer executable.
+        assert name_cell[1:] == f"{trigger}cmd|' /c calc'!A0"
+
+    def test_neutralizes_policy_names_paths_and_errors(self):
+        root = org_map()["root"]
+        root["name"] = "=Root"
+        root["path"] = "=Root"
+        root["accountsError"] = "=BOOM()"
+        root["policies"] = [
+            {"id": "p", "name": "=Evil", "type": "SERVICE_CONTROL_POLICY"}
+        ]
+        row = rows_for(org_map(root=root))[1]
+        assert row[1].startswith("'")  # OU Path
+        assert row[2].startswith("'")  # Name
+        assert row[6].startswith("'")  # SCP names
+        assert row[9].startswith("'")  # Error
+
+    def test_leaves_ordinary_values_untouched(self):
+        rows = rows_for(org_map())
+        assert rows[1][2] == "Root"
+        assert rows[1][6] == "FullAWSAccess"
+
+    def test_guards_the_checks_csv_error_column_too(self):
+        """Check error text is AWS-provided and lands in a cell as well."""
+        content = generate_csv(
+            [
+                {
+                    "check": "Example",
+                    "description": "d",
+                    "status": "error",
+                    "required": True,
+                    "weight": 1,
+                    "loe": 1,
+                    "remediationLink": "https://example.com",
+                    "error": "=cmd|' /c calc'!A0",
+                }
+            ]
+        )
+        assert list(csv.reader(io.StringIO(content)))[1][7].startswith("'")
+
+
+class TestPartialMapIsFlagged:
+    """A reader who opens only the CSV must not see an incomplete map as whole."""
+
+    def test_policy_lookup_errors_reach_the_root_error_cell(self):
+        data = org_map(
+            policyLookupErrors=[
+                {"scope": "INSPECTOR_POLICY", "error": "TooManyRequestsException"}
+            ]
+        )
+        root_error = rows_for(data)[1][9]
+        assert "may be incomplete" in root_error
+        assert "INSPECTOR_POLICY" in root_error
+        assert "TooManyRequestsException" in root_error
+
+    def test_depth_truncation_reaches_the_root_error_cell(self):
+        root_error = rows_for(org_map(depthTruncated=True))[1][9]
+        assert "nested deeper" in root_error
+
+    def test_map_warnings_do_not_displace_a_node_note(self):
+        root = org_map()["root"]
+        root["accountsError"] = "AccessDenied"
+        data = org_map(
+            root=root,
+            policyLookupErrors=[{"scope": "TAG_POLICY", "error": "Denied"}],
+        )
+        root_error = rows_for(data)[1][9]
+        assert "TAG_POLICY" in root_error
+        assert "AccessDenied" in root_error
+
+    def test_clean_map_has_no_error_text(self):
+        assert rows_for(org_map())[1][9] == ""

@@ -3,38 +3,36 @@
 Generates a CSV file with all check results, plus a separate CSV of the
 organization and OU account map. The two stay in separate files so that
 ``wafa-checks.csv`` keeps one row per check.
+
+Both exports pass every cell through ``_csv_safe``, because cells can contain
+AWS-provided text: OU and account names in the organization map, and API error
+messages in either file.
 """
 
 import csv
 import io
 
 from src.checks.org_map import flatten_rows
+from src.report.policy_labels import policy_type_label
 
-# Short display labels for Organizations policy types. Mirrors
-# POLICY_TYPE_LABELS in report-ui/src/App.jsx — update both together.
-_POLICY_TYPE_LABELS = {
-    "SERVICE_CONTROL_POLICY": "SCP",
-    "RESOURCE_CONTROL_POLICY": "RCP",
-    "TAG_POLICY": "Tag",
-    "BACKUP_POLICY": "Backup",
-    "AISERVICES_OPT_OUT_POLICY": "AI opt-out",
-    "CHATBOT_POLICY": "Chatbot",
-    "DECLARATIVE_POLICY_EC2": "Declarative EC2",
-    "SECURITYHUB_POLICY": "Security Hub",
-    "INSPECTOR_POLICY": "Inspector",
-    "UPGRADE_ROLLOUT_POLICY": "Upgrade rollout",
-    "BEDROCK_POLICY": "Bedrock",
-    "S3_POLICY": "S3",
-    "NETWORK_SECURITY_DIRECTOR_POLICY": "Network security",
-    "GUARDDUTY_POLICY": "GuardDuty",
-}
+# A spreadsheet treats a cell starting with any of these as a formula, so a
+# value such as "=cmd|' /c calc'!A0" taken from an AWS resource name would
+# execute on open. Prefixing with an apostrophe makes the cell literal text.
+_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
 
 
-def policy_type_label(policy_type):
-    """Return a short display label for an Organizations policy type."""
-    if policy_type in _POLICY_TYPE_LABELS:
-        return _POLICY_TYPE_LABELS[policy_type]
-    return (policy_type or "").replace("_", " ").title()
+def _csv_safe(value):
+    """Neutralize spreadsheet formula injection in a single cell."""
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else str(value)
+    if text.startswith(_FORMULA_TRIGGERS):
+        return "'" + text
+    return text
+
+
+def _write_row(writer, values):
+    writer.writerow([_csv_safe(value) for value in values])
 
 
 def generate_csv(checks):
@@ -65,7 +63,8 @@ def generate_csv(checks):
 
     # Data rows
     for check in checks:
-        writer.writerow(
+        _write_row(
+            writer,
             [
                 check.get("check", ""),
                 check.get("description", ""),
@@ -75,7 +74,7 @@ def generate_csv(checks):
                 check.get("loe", ""),
                 check.get("remediationLink", ""),
                 check.get("error", ""),
-            ]
+            ],
         )
 
     return output.getvalue()
@@ -107,12 +106,36 @@ def _other_policy_names(policies):
     )
 
 
+def _map_level_warnings(org_map):
+    """Warnings that apply to the whole map rather than one node.
+
+    These reach the CSV so that a reader who opens only the spreadsheet cannot
+    mistake an incomplete map for a complete one (FR-12.3).
+    """
+    warnings = []
+    for failure in org_map.get("policyLookupErrors") or []:
+        warnings.append(
+            f"Attached policies may be incomplete for {failure.get('scope', '')}: "
+            f"{failure.get('error', '')}"
+        )
+    if org_map.get("depthTruncated"):
+        warnings.append(
+            "OU hierarchy is nested deeper than this map walks; "
+            "some OUs and accounts are not listed"
+        )
+    return warnings
+
+
 def generate_org_map_csv(org_map):
     """Generate CSV content for the organization and OU account map.
 
     One row per root, OU, and account. Policy columns list only the policies
     attached *directly* to that row's target, never inherited ones, so an empty
     cell means "nothing attached here" rather than "nothing applies".
+
+    Map-level warnings (failed policy lookups, a truncated hierarchy) are
+    written into the root row's Error cell, so the spreadsheet never presents an
+    incomplete map as a complete one.
 
     Args:
         org_map: the map dict from ``src.checks.org_map.get_organization_map``
@@ -141,9 +164,16 @@ def generate_org_map_csv(org_map):
         ]
     )
 
-    for row in rows:
+    map_warnings = _map_level_warnings(org_map)
+
+    for index, row in enumerate(rows):
         policies = row.get("policies") or []
-        writer.writerow(
+        notes = [row.get("note", "")] if row.get("note") else []
+        if index == 0:
+            # The root row carries the map-level warnings.
+            notes = map_warnings + notes
+        _write_row(
+            writer,
             [
                 _ROW_TYPE_LABELS.get(row.get("kind"), row.get("kind", "")),
                 row.get("path", ""),
@@ -154,8 +184,8 @@ def generate_org_map_csv(org_map):
                 _names_of_type(policies, "SERVICE_CONTROL_POLICY"),
                 _names_of_type(policies, "RESOURCE_CONTROL_POLICY"),
                 _other_policy_names(policies),
-                row.get("note", ""),
-            ]
+                "; ".join(notes),
+            ],
         )
 
     return output.getvalue()

@@ -10,7 +10,13 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from src.main import exit_code, print_summary, run, upload_to_s3
+from src.main import (
+    exit_code,
+    print_org_map_summary,
+    print_summary,
+    run,
+    upload_to_s3,
+)
 
 
 def test_deployment_names_use_wa_foundations_prefix():
@@ -941,7 +947,7 @@ class TestOrganizationMapOrchestration:
         mock_parse_args,
         tmp_path,
     ):
-        """A map failure surfaces in the report and emits no diagram."""
+        """A map failure surfaces in the report and writes no map CSV."""
         output_dir = str(tmp_path)
         mock_parse_args.return_value = MagicMock(output=output_dir)
         mock_get_org_map.return_value = (None, "AccessDeniedException")
@@ -969,6 +975,71 @@ class TestOrganizationMapOrchestration:
         with open(os.path.join(output_dir, "wafa-report.html")) as f:
             assert "AccessDeniedException" in f.read()
         assert not os.path.exists(os.path.join(output_dir, "wafa-org-map.csv"))
+
+    @patch("src.main.parse_args")
+    @patch("src.main.detect_partition")
+    @patch("boto3.client")
+    def test_s3_output_uploads_the_org_map_csv(
+        self, mock_client, mock_partition, mock_parse_args
+    ):
+        """CodeBuild writes to S3, so the map must be in the uploaded set."""
+        mock_parse_args.return_value = MagicMock(output="s3://results-bucket/reports")
+        mock_partition.return_value = {
+            "partition": "aws",
+            "default_region": "us-east-1",
+        }
+        base_factory = _mock_management_account_boto3()
+        mock_s3 = MagicMock()
+
+        def client_factory(service, **kwargs):
+            if service == "s3":
+                return mock_s3
+            return base_factory(service, **kwargs)
+
+        mock_client.side_effect = client_factory
+
+        run()
+
+        uploaded = {
+            call.kwargs["Key"].rsplit("/", 1)[-1]: call.kwargs
+            for call in mock_s3.put_object.call_args_list
+        }
+        assert "wafa-org-map.csv" in uploaded
+        assert uploaded["wafa-org-map.csv"]["ContentType"] == "text/csv"
+        assert "Type,OU Path,Name" in uploaded["wafa-org-map.csv"]["Body"]
+        # The pre-existing reports are still uploaded alongside it.
+        assert {"wafa-report.html", "wafa-checks.csv", "wafa-raw.json"} <= set(uploaded)
+
+    @patch("src.main.parse_args")
+    @patch("src.main.detect_partition")
+    @patch("boto3.client")
+    def test_map_cannot_change_checks_or_maturity(
+        self, mock_client, mock_partition, mock_parse_args, tmp_path
+    ):
+        """FR-12 is informational: removing it must not move a single result."""
+        mock_partition.return_value = {
+            "partition": "aws",
+            "default_region": "us-east-1",
+        }
+
+        def run_once(with_map):
+            mock_parse_args.return_value = MagicMock(output=str(tmp_path))
+            mock_client.side_effect = _mock_management_account_boto3()
+            if with_map:
+                return run()
+            with patch("src.main.get_organization_map", return_value=(None, None)):
+                return run()
+
+        checks_with, maturity_with = run_once(True)
+        checks_without, maturity_without = run_once(False)
+
+        assert [c["check"] for c in checks_with] == [c["check"] for c in checks_without]
+        assert [c["status"] for c in checks_with] == [
+            c["status"] for c in checks_without
+        ]
+        assert maturity_with == maturity_without
+        # No check is derived from the map.
+        assert not [c for c in checks_with if "organization map" in c["check"].lower()]
 
 
 # ============================================================================
@@ -1111,6 +1182,14 @@ class TestRunStandaloneAccount:
         assert os.path.exists(os.path.join(output_dir, "wafa-report.html"))
         assert os.path.exists(os.path.join(output_dir, "wafa-raw.json"))
 
+        # FR-12: standalone is a limited mode, so the map is absent rather
+        # than reported as a failure, and no map CSV is written.
+        with open(os.path.join(output_dir, "wafa-raw.json")) as f:
+            raw = json.load(f)
+        assert raw["organization_map"] is None
+        assert raw["organization_map_error"] is None
+        assert not os.path.exists(os.path.join(output_dir, "wafa-org-map.csv"))
+
     @patch("src.main.parse_args")
     @patch("src.checks.account_resources.boto3.client")
     @patch("src.checks.identity.boto3.client")
@@ -1192,6 +1271,12 @@ class TestRunUnknownAccountType:
         assert raw["account_info"]["account_type"] == "unknown"
         assert "AccessDeniedException" in raw["account_info"]["detection_error"]
         assert raw["delegated_administrators_error"] is None
+
+        # FR-12: an undetermined account type takes the limited path, so the
+        # map is absent rather than reported as a failure.
+        assert raw["organization_map"] is None
+        assert raw["organization_map_error"] is None
+        assert not (tmp_path / "wafa-org-map.csv").exists()
 
 
 # ============================================================================
@@ -1328,3 +1413,102 @@ def test_exit_code_fails_only_when_every_check_errors():
     assert exit_code([{"status": "error"}, {"status": "incomplete"}]) == 0
     assert exit_code([{"status": "complete"}]) == 0
     assert exit_code([]) == 0
+
+
+# ============================================================================
+# FR-12.5 — organization map console summary
+# ============================================================================
+
+
+def _summary_map(**overrides):
+    """A minimal organization map for console summary tests."""
+    data = {
+        "organizationId": "o-example12345",
+        "enabledPolicyTypes": ["SERVICE_CONTROL_POLICY"],
+        "policyTypesNotEnabled": ["RESOURCE_CONTROL_POLICY"],
+        "policyLookupErrors": [],
+        "totals": {"organizationalUnits": 1, "accounts": 1, "maxDepth": 1},
+        "root": {
+            "id": "r-root",
+            "name": "Root",
+            "type": "ROOT",
+            "path": "Root",
+            "depth": 0,
+            "policies": [
+                {
+                    "id": "p-full",
+                    "name": "FullAWSAccess",
+                    "type": "SERVICE_CONTROL_POLICY",
+                    "awsManaged": True,
+                }
+            ],
+            "accounts": [
+                {
+                    "id": "111111111111",
+                    "name": "Management",
+                    "status": "ACTIVE",
+                    "policies": [],
+                }
+            ],
+            "children": [],
+        },
+    }
+    data.update(overrides)
+    return data
+
+
+class TestPrintOrgMapSummary:
+    def test_prints_totals_and_attachment_count(self, capsys):
+        print_org_map_summary(_summary_map(), None)
+        out = capsys.readouterr().out
+        assert "1 OUs" in out
+        assert "1 accounts" in out
+        assert "1 direct policy attachments" in out
+
+    def test_reports_policy_types_not_enabled(self, capsys):
+        print_org_map_summary(_summary_map(), None)
+        assert "RESOURCE_CONTROL_POLICY" in capsys.readouterr().out
+
+    def test_reports_policy_lookup_errors(self, capsys):
+        data = _summary_map(
+            policyLookupErrors=[
+                {"scope": "INSPECTOR_POLICY", "error": "TooManyRequestsException"}
+            ]
+        )
+        out = capsys.readouterr().out
+        print_org_map_summary(data, None)
+        out = capsys.readouterr().out
+        assert "may be incomplete" in out
+        assert "INSPECTOR_POLICY" in out
+        assert "TooManyRequestsException" in out
+
+    def test_reports_a_denied_account_listing(self, capsys):
+        """Without this the totals read as a complete, smaller organization."""
+        data = _summary_map()
+        data["root"]["accountsError"] = "AccessDeniedException"
+        print_org_map_summary(data, None)
+        out = capsys.readouterr().out
+        assert "AccessDeniedException" in out
+        assert "Root" in out
+
+    def test_reports_an_unreadable_child_ou(self, capsys):
+        data = _summary_map()
+        data["root"]["childrenError"] = "ThrottlingException"
+        print_org_map_summary(data, None)
+        assert "ThrottlingException" in capsys.readouterr().out
+
+    def test_reports_a_truncated_walk(self, capsys):
+        data = _summary_map()
+        data["root"]["childrenTruncated"] = "Walk stopped at the 5-level limit"
+        print_org_map_summary(data, None)
+        assert "Walk stopped" in capsys.readouterr().out
+
+    def test_reports_a_map_that_could_not_be_built(self, capsys):
+        print_org_map_summary(None, "AccessDeniedException")
+        out = capsys.readouterr().out
+        assert "could not be built" in out
+        assert "AccessDeniedException" in out
+
+    def test_prints_nothing_without_a_map(self, capsys):
+        print_org_map_summary(None, None)
+        assert capsys.readouterr().out == ""

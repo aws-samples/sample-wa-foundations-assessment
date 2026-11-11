@@ -44,6 +44,7 @@ class FakeOrganizations:
         account_errors=None,
         list_policies_errors=None,
         targets_errors=None,
+        page_size=None,
     ):
         self.ous = ous or {}
         self.accounts = accounts or {}
@@ -55,6 +56,10 @@ class FakeOrganizations:
         self.account_errors = account_errors or {}
         self.list_policies_errors = list_policies_errors or {}
         self.targets_errors = targets_errors or {}
+        # Organizations pages at roughly 20 items. page_size=1 forces every
+        # list to span multiple pages, so code that reads only the first page
+        # is caught instead of passing against a single-page fake.
+        self.page_size = page_size
         # list.append is atomic, so these stay correct under the thread pool.
         self.list_policies_calls = []
         self.targets_calls = []
@@ -83,27 +88,36 @@ class FakeOrganizations:
             ]
         }
 
+    def _paged(self, key, items):
+        """Yield items as one page, or as several when page_size is set."""
+        items = items or []
+        if not self.page_size:
+            yield {key: items}
+            return
+        for start in range(0, max(len(items), 1), self.page_size):
+            yield {key: items[start : start + self.page_size]}
+
     def _ou_pages(self, ParentId):
         if ParentId in self.ou_errors:
             raise self.ou_errors[ParentId]
-        yield {"OrganizationalUnits": self.ous.get(ParentId, [])}
+        yield from self._paged("OrganizationalUnits", self.ous.get(ParentId, []))
 
     def _account_pages(self, ParentId):
         if ParentId in self.account_errors:
             raise self.account_errors[ParentId]
-        yield {"Accounts": self.accounts.get(ParentId, [])}
+        yield from self._paged("Accounts", self.accounts.get(ParentId, []))
 
     def _list_policies_pages(self, Filter):
         self.list_policies_calls.append(Filter)
         if Filter in self.list_policies_errors:
             raise self.list_policies_errors[Filter]
-        yield {"Policies": self.policies_by_type.get(Filter, [])}
+        yield from self._paged("Policies", self.policies_by_type.get(Filter, []))
 
     def _targets_pages(self, PolicyId):
         self.targets_calls.append(PolicyId)
         if PolicyId in self.targets_errors:
             raise self.targets_errors[PolicyId]
-        yield {"Targets": self.targets_by_policy.get(PolicyId, [])}
+        yield from self._paged("Targets", self.targets_by_policy.get(PolicyId, []))
 
     def get_paginator(self, name):
         pages = {
@@ -263,6 +277,14 @@ class TestOrganizationMapStructure:
         assert data["depthTruncated"] is True
         assert data["totals"]["maxDepth"] == MAX_OU_DEPTH
 
+        # The node where the walk stopped says so, so the gap is locatable
+        # rather than only flagged once for the whole organization.
+        deepest = next(
+            row for row in flatten_rows(data) if row["depth"] == MAX_OU_DEPTH
+        )
+        assert "nesting limit" in deepest["note"]
+        assert "not listed" in deepest["note"]
+
     def test_hierarchy_exactly_at_the_depth_guard_is_not_truncated(self):
         """An OU at the nesting limit has no children, so nothing was missed."""
         ous = {"r-root": [{"Id": "ou-1", "Name": "L1"}]}
@@ -277,6 +299,65 @@ class TestOrganizationMapStructure:
     def test_no_truncation_flag_within_the_depth_guard(self):
         data, _ = run_map(sample_org())
         assert "depthTruncated" not in data
+
+
+class TestPagination:
+    """Organizations pages at ~20 items; reading one page silently drops data."""
+
+    def test_collects_every_page_of_every_list(self):
+        fake = sample_org(page_size=1)
+        data, error = run_map(fake)
+
+        assert error is None
+        # All OUs across multiple pages of ListOrganizationalUnitsForParent.
+        assert data["totals"]["organizationalUnits"] == 3
+        assert [ou["name"] for ou in data["root"]["children"]] == [
+            "Security",
+            "Workloads",
+        ]
+        # All accounts across multiple pages of ListAccountsForParent.
+        assert data["totals"]["accounts"] == 4
+        assert [a["name"] for a in find_node(data["root"], "ou-sec")["accounts"]] == [
+            "Audit",
+            "Log Archive",
+        ]
+        # All policies across multiple pages of ListPolicies, and all targets
+        # across multiple pages of ListTargetsForPolicy.
+        assert [p["name"] for p in data["root"]["policies"]] == ["FullAWSAccess"]
+        assert [p["name"] for p in find_node(data["root"], "ou-sec")["policies"]] == [
+            "DenyRootUser"
+        ]
+        assert [
+            p["name"] for p in find_account(data["root"], "444444444444")["policies"]
+        ] == ["DenyRootUser"]
+
+    def test_paged_and_unpaged_results_agree(self):
+        single, _ = run_map(sample_org())
+        paged, _ = run_map(sample_org(page_size=1))
+        assert single == paged
+
+
+class TestPathEscaping:
+    def test_escapes_a_slash_inside_an_ou_name(self):
+        """An OU named "Prod/EU" must not collide with "EU" inside "Prod"."""
+        fake = sample_org(
+            ous={"r-root": [{"Id": "ou-x", "Name": "Prod/EU"}]},
+            accounts={},
+        )
+        data, _ = run_map(fake)
+        assert find_node(data["root"], "ou-x")["path"] == "Root/Prod\\/EU"
+
+    def test_nested_ous_keep_their_distinct_path(self):
+        fake = sample_org(
+            ous={
+                "r-root": [{"Id": "ou-p", "Name": "Prod"}],
+                "ou-p": [{"Id": "ou-e", "Name": "EU"}],
+            },
+            accounts={},
+        )
+        data, _ = run_map(fake)
+        # Distinct from the escaped "Root/Prod\/EU" above.
+        assert find_node(data["root"], "ou-e")["path"] == "Root/Prod/EU"
 
 
 class TestPolicyAttachment:

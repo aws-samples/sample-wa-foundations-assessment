@@ -96,6 +96,84 @@ function orgMap(overrides = {}) {
   };
 }
 
+// Mirrors what _org_map_rows() in src/report/html_report.py puts in the
+// payload: flattened rows with a stable key and finished policy labels. The UI
+// renders these directly and never re-derives them.
+function orgMapRows(overrides = []) {
+  return overrides.length
+    ? overrides
+    : [
+        {
+          key: "root:r-root",
+          kind: "root",
+          name: "Root",
+          id: "r-root",
+          depth: 0,
+          path: "Root",
+          status: "",
+          note: "",
+          policies: [
+            {
+              id: "p-full",
+              name: "FullAWSAccess",
+              type: "SERVICE_CONTROL_POLICY",
+              awsManaged: true,
+              typeLabel: "SCP",
+            },
+          ],
+        },
+        {
+          key: "account:111111111111",
+          kind: "account",
+          name: "Management",
+          id: "111111111111",
+          depth: 1,
+          path: "Root",
+          status: "ACTIVE",
+          note: "",
+          policies: [],
+        },
+        {
+          key: "ou:ou-sec",
+          kind: "ou",
+          name: "Security",
+          id: "ou-sec",
+          depth: 1,
+          path: "Root/Security",
+          status: "",
+          note: "",
+          policies: [
+            {
+              id: "p-deny",
+              name: "DenyRootUser",
+              type: "SERVICE_CONTROL_POLICY",
+              awsManaged: false,
+              typeLabel: "SCP",
+            },
+          ],
+        },
+        {
+          key: "account:333333333333",
+          kind: "account",
+          name: "Audit",
+          id: "333333333333",
+          depth: 2,
+          path: "Root/Security",
+          status: "SUSPENDED",
+          note: "",
+          policies: [
+            {
+              id: "p-acct",
+              name: "AccountGuardrail",
+              type: "SERVICE_CONTROL_POLICY",
+              awsManaged: false,
+              typeLabel: "SCP",
+            },
+          ],
+        },
+      ];
+}
+
 function reportData(overrides = {}) {
   return {
     checks: [
@@ -162,6 +240,8 @@ function reportData(overrides = {}) {
     ],
     delegated_administrators_error: null,
     organization_map: orgMap(),
+    organization_map_rows: orgMapRows(),
+    organization_map_not_enabled_labels: ["RCP"],
     organization_map_error: null,
     account_info: {
       account_id: "111111111111",
@@ -199,6 +279,7 @@ describe("report UI", () => {
       "#maturity",
       "#capabilities",
       "#checks",
+      "#org-map",
       "#delegated-admins",
       "#methodology",
     ];
@@ -426,10 +507,10 @@ describe("report UI", () => {
     );
   });
 
-  it("surfaces per-node organization map errors", () => {
-    const map = orgMap();
-    map.root.children[0].accountsError = "AccessDenied listing accounts";
-    const { container } = renderReport({ organization_map: map });
+  it("surfaces per-node organization map warnings", () => {
+    const rows = orgMapRows();
+    rows[2].note = "AccessDenied listing accounts";
+    const { container } = renderReport({ organization_map_rows: rows });
     expect(container.querySelector("#org-map").textContent).toContain(
       "AccessDenied listing accounts",
     );
@@ -449,6 +530,7 @@ describe("report UI", () => {
   it("omits the organization map section in limited mode", () => {
     const { container, wrapper } = renderReport({
       organization_map: null,
+      organization_map_rows: [],
       organization_map_error: null,
     });
     expect(container.querySelector("#org-map")).toBeNull();
@@ -456,12 +538,30 @@ describe("report UI", () => {
   });
 
   it("renders untrusted OU names as text", () => {
-    const map = orgMap();
-    map.root.children[0].name = "<script>alert(1)</script>";
-    const { container } = renderReport({ organization_map: map });
+    const rows = orgMapRows();
+    rows[2].name = "<script>alert(1)</script>";
+    const { container } = renderReport({ organization_map_rows: rows });
     const section = container.querySelector("#org-map");
     expect(section.querySelector("script")).toBeNull();
     expect(section.textContent).toContain("<script>alert(1)</script>");
+  });
+
+  it("renders the policy label supplied by the report payload", () => {
+    const rows = orgMapRows();
+    // An unrecognized type is labelled in Python; the UI must not re-derive it.
+    rows[0].policies = [
+      {
+        id: "p-new",
+        name: "NewThing",
+        type: "SOME_NEW_POLICY",
+        awsManaged: false,
+        typeLabel: "Some New Policy",
+      },
+    ];
+    const { container } = renderReport({ organization_map_rows: rows });
+    expect(container.querySelector("#org-map").textContent).toContain(
+      "Some New Policy: NewThing",
+    );
   });
 
   it("links to the GitHub repository in the footer", () => {
