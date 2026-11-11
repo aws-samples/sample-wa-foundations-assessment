@@ -21,7 +21,6 @@ from pathlib import Path
 from jinja2 import BaseLoader, select_autoescape
 from jinja2.sandbox import SandboxedEnvironment
 
-from src.checks.org_map import flatten_rows
 from src.report.policy_labels import labelled_policies, policy_type_label
 
 ASSETS_DIR = Path(__file__).parent / "assets"
@@ -117,19 +116,23 @@ def _load_asset(name):
     return (ASSETS_DIR / name).read_text(encoding="utf-8")
 
 
-def _org_map_rows(org_map):
+def _org_map_rows(rows):
     """Return display rows for the organization map, with policy labels.
 
     ``key`` is a stable row identity for the report table, so the UI does not
-    have to construct one.
+    have to construct one. It leads with the row's position because an AWS id
+    defaults to an empty string: two rows that are both missing an id would
+    otherwise share a key, and the table would render duplicate or wrong rows
+    once it is filtered or paged. The order never changes — the table is not
+    sortable, and the rows are the hierarchy — so the position is stable.
     """
     return [
         dict(
             row,
-            key=f"{row.get('kind', '')}:{row.get('id', '')}",
+            key=f"{index}:{row.get('kind', '')}:{row.get('id', '')}",
             policies=labelled_policies(row.get("policies")),
         )
-        for row in flatten_rows(org_map)
+        for index, row in enumerate(rows or [])
     ]
 
 
@@ -140,10 +143,13 @@ def _org_map_summary(org_map):
     roughly doubles the inline JSON for data the UI never reads: it renders the
     flattened rows plus these few summary fields.
 
-    ``depthTruncatedPaths`` replaces the ``depthTruncated`` flag for display.
-    An empty list means the walk completed, and a non-empty one names the OUs
-    where it stopped, so the summary locates the gap instead of restating a
-    condition that each affected row already carries as a note.
+    The two path lists carry every reason the map may be incomplete that is
+    attributable to a node: ``depthTruncatedPaths`` where the walk stopped,
+    and ``nodeListingErrorPaths`` where an account or child-OU listing failed.
+    An empty list means that did not happen. A non-empty one names the nodes,
+    so the section can warn above the table — the row's own note would
+    otherwise be the only sign, and it may be filtered out or on a later page
+    while the header totals read as a complete, smaller organization.
     """
     if not org_map:
         return None
@@ -152,6 +158,7 @@ def _org_map_summary(org_map):
         "totals": org_map.get("totals") or {},
         "policyLookupErrors": org_map.get("policyLookupErrors") or [],
         "depthTruncatedPaths": org_map.get("depthTruncatedPaths") or [],
+        "nodeListingErrorPaths": org_map.get("nodeListingErrorPaths") or [],
     }
 
 
@@ -163,6 +170,7 @@ def _build_report_data(
     delegated_admins_error=None,
     org_map=None,
     org_map_error=None,
+    org_map_rows=None,
 ):
     """Assemble the JSON payload rendered by the Cloudscape report UI."""
     axis_scores = _calculate_axis_scores(checks)
@@ -183,7 +191,7 @@ def _build_report_data(
         # Flattened in Python so the UI renders structured data instead of
         # re-deriving the hierarchy and policy labels in JavaScript, which
         # would let the CSV and the HTML from one run disagree.
-        "organization_map_rows": _org_map_rows(org_map),
+        "organization_map_rows": _org_map_rows(org_map_rows),
         # Labels for the guardrail policy types that are not enabled, so the
         # UI never derives a label itself.
         "organization_map_not_enabled_labels": [
@@ -218,6 +226,7 @@ def generate_html(
     delegated_admins_error=None,
     org_map=None,
     org_map_error=None,
+    org_map_rows=None,
 ):
     """Generate the interactive HTML report.
 
@@ -230,6 +239,9 @@ def generate_html(
             listed (optional)
         org_map: organization and OU account map dict (optional, FR-12)
         org_map_error: why the organization map could not be built (optional)
+        org_map_rows: the map's flattened rows from ``flatten_rows``. Passed
+            in so the console, the CSV, and this report render the same rows
+            from one flattening per run.
 
     Returns:
         str: Complete HTML document as string
@@ -260,6 +272,7 @@ def generate_html(
             delegated_admins_error,
             org_map,
             org_map_error,
+            org_map_rows,
         ),
         report_css=_load_asset("report-ui.css"),
         report_js=_load_asset("report-ui.js"),

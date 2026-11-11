@@ -376,8 +376,7 @@ so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. 
     listed, so the gap is locatable. Flag truncation only when children actually exist past the limit: an
     OU sitting exactly at the limit with no children is not truncation.
   - Summarize the same condition at map level as `depthTruncated` with `depthTruncatedPaths` naming those
-    nodes. The summary locates the gap; the explanation stays on the node. No output restates a node's
-    warning at map level (see FR-12.4 and FR-12.5).
+    nodes (see FR-12.6).
   - Build each node's `path` by joining names with `/`, escaping `\` and then `/` inside a name. AWS
     permits `/` in an OU name, so an OU literally named `Prod/EU` would otherwise produce the same path as
     an OU `EU` nested inside an OU `Prod`. Escaping the backslash first keeps the escaping reversible.
@@ -385,6 +384,10 @@ so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. 
   account placement. Include suspended accounts with their `status`; do not drop them. Record the account
   `id`, `name`, and `status` only — never the account email address, which is personal data not needed to
   place an account.
+  - A failed account or child-OU listing is recorded on that node as `accountsError` or `childrenError`,
+    and at map level as `nodeListingErrors` with `nodeListingErrorPaths` naming those nodes (see FR-12.6).
+    The totals count what was read, so without the map-level field a partial map reads as a complete,
+    smaller organization.
 - FR-12.3: Collect policy attachments by enumerating policies, not by interrogating targets. For each policy
   type that is `ENABLED` on the root, call `organizations.listPolicies()` (paginate fully); then for each
   policy returned, call `organizations.listTargetsForPolicy()` (paginate fully) and attach it to the matching
@@ -406,6 +409,8 @@ so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. 
     indistinguishable from "enabled but genuinely unused".
   - Use a bounded `ThreadPoolExecutor`, creating the client in the calling thread (see NFR-2.2), and await
     every lookup so one failure cannot hide another policy's attachments.
+  - Record every lookup failure through one handler that selects the message by error code, so no later
+    branch can swallow a failure instead of reporting it.
   - Configure the Organizations client with **adaptive** retries. Organizations enforces a low request rate
     and standard mode has no client-side rate limiting, so a burst of concurrent reads exhausts its attempts
     and silently loses attachments.
@@ -418,10 +423,15 @@ so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. 
   SCPs, RCPs, and other policy types into their own columns. Keep it separate from `wafa-checks.csv`, which
   stays one row per check. Escape cells that begin with `=`, `+`, `-`, `@`, tab, or CR so AWS-provided
   names and error messages cannot execute as spreadsheet formulas.
-  - Warnings that belong to no single row, that is `policyLookupErrors`, go in the root row's Error cell so
-    a reader who opens only the spreadsheet cannot mistake an incomplete map for a complete one, without
-    displacing that row's own note. A warning attributable to one node — `accountsError`, `childrenError`,
-    `childrenTruncated` — appears only in that node's Error cell.
+  - The root row's Error cell carries every reason the map may be incomplete, so a reader who opens only
+    the spreadsheet cannot mistake a partial map for a complete one: the `policyLookupErrors` messages,
+    which belong to no row, plus a count and the affected paths for the conditions that do (see FR-12.6).
+    It never displaces that row's own note.
+  - Escape cells so AWS-provided text cannot execute as a spreadsheet formula: prefix with an apostrophe
+    when the value begins with a tab, CR, or LF, or when it begins with `=`, `+`, `-`, or `@` after leading
+    whitespace is ignored. A value that is a plain number is left alone, so a signed number still matches
+    the same value in `wafa-raw.json`. This applies to `wafa-checks.csv` as well, whose `Error` column
+    carries AWS API messages.
 - FR-12.5: Display as a separate "Organization Map" section in the HTML report, below the check results,
   with an indented structure table, account placement, status, and attached-policy badges. Print a one-line
   console summary of OU, account, and attachment counts.
@@ -430,22 +440,42 @@ so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. 
   - Render display labels, not API constants, for policy types in every output including the console.
   - `wafa-raw.json` carries the complete map as `organization_map`, plus `organization_map_error` when it
     could not be built. The HTML report data carries `organization_map_rows` (rows flattened in Python with
-    finished policy labels and a stable row key) and `organization_map_summary`, which holds only the
-    map-level fields the UI reads: `organizationId`, `totals`, `policyLookupErrors`, and
-    `depthTruncatedPaths`. The HTML must not embed the tree as well, which would roughly double the inline
-    JSON for data the UI never reads.
+    finished policy labels and a row key that leads with the row's position, because an AWS id defaults to
+    an empty string and two rows missing an id would otherwise share a key) and
+    `organization_map_summary`, which holds only the map-level fields the UI reads: `organizationId`,
+    `totals`, `policyLookupErrors`, `depthTruncatedPaths`, and `nodeListingErrorPaths`. The HTML must not
+    embed the tree as well, which would roughly double the inline JSON for data the UI never reads.
+  - Flatten the tree once per run and pass the same rows to the console, the CSV, and the HTML report, so
+    the three cannot disagree.
   - A per-node failure is recorded on that node as `accountsError` or `childrenError` and keeps the rest of
     the map, mirroring FR-9's partial-result behavior. Policy lookup failures are organization-wide rather
     than per-node and are reported through `policyLookupErrors`.
-  - The console prints every map-level and per-node warning, each naming its node, but caps the warning
-    lines and states how many were withheld. A throttled large organization can produce a warning per node,
-    which would otherwise push the check results off-screen; the HTML report and the CSV carry them all.
+  - The console states how many nodes could not be fully listed before printing the individual warnings,
+    then prints every map-level and per-node warning, each naming its node, capped with a count of the
+    withheld lines. A throttled large organization can produce a warning per node, which would otherwise
+    push the check results off-screen; the HTML report and the CSV carry them all.
   - NOT scored — informational reference only.
+- FR-12.6: Every reason the map may be incomplete must be visible without reading the whole map. Each is
+  recorded twice, with a different job in each place, and never as the same sentence twice:
+  - On the node it affects (`accountsError`, `childrenError`, `childrenTruncated`), which explains what
+    happened, and in the CSV and the report table is the row's own Error cell or note.
+  - At map level, as a boolean plus the affected paths (`nodeListingErrors` / `nodeListingErrorPaths`,
+    `depthTruncated` / `depthTruncatedPaths`), which states that the totals are lower bounds and locates
+    the affected nodes. The report renders an Alert above the table, the CSV writes it to the root row, and
+    the console prints the count. A per-row note alone is not sufficient: the row may be filtered out or on
+    a later page of a paged table.
+  - `policyLookupErrors` has no row of its own, so its message appears at map level only.
+- FR-12.7: Reads that every organization check shares — `DescribeOrganization` and `ListRoots` — are
+  resolved once per run through `src/checks/org_api.py` rather than once per check. Cache successful
+  responses only, so one denied or throttled read does not become an error for every later check, and
+  clear the cache at the start of a run. The pagination helpers live there too, so no scored check depends
+  on an informational module for them.
 - Output: `{organizationId, managementAccountId, root, enabledPolicyTypes, policyTypesNotEnabled,
   policyLookupErrors, totals: {organizationalUnits, accounts, maxDepth}, depthTruncated?,
-  depthTruncatedPaths?}`, where each node is `{id, name, type, path, depth, policies: [...],
-  accounts: [...], children: [...]}` plus `accountsError?`, `childrenError?`, and `childrenTruncated?`, and
-  each account is `{id, name, status, policies: [...]}`.
+  depthTruncatedPaths?, nodeListingErrors?, nodeListingErrorPaths?}`, where each node is
+  `{id, name, type, path, depth, policies: [...], accounts: [...], children: [...]}` plus
+  `accountsError?`, `childrenError?`, and `childrenTruncated?`, and each account is
+  `{id, name, status, policies: [...]}`.
 
 ## Non-Functional Requirements
 

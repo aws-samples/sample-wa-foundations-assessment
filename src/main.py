@@ -15,6 +15,7 @@ from src.checks import (
     account_resources,
     control_tower,
     identity,
+    org_api,
     org_services,
     organization,
 )
@@ -84,21 +85,27 @@ def print_summary(checks, maturity):
     print("-" * 80)
 
 
-def print_org_map_summary(org_map, org_map_error):
+def print_org_map_summary(org_map, org_map_error, rows):
     """Print a console summary of the organization map (FR-12.5).
 
     Reasons the map could be incomplete are printed, not just the totals: the
     counts alone would otherwise read as a complete, smaller organization when
     an OU's accounts or children could not be listed. The warning lines are
-    capped at ``MAX_ORG_MAP_CONSOLE_WARNINGS`` and the withheld count is
-    stated, because every warning is also in the HTML report and the CSV.
+    capped at ``MAX_ORG_MAP_CONSOLE_WARNINGS``, with a count of the nodes
+    affected and of the withheld lines, because every warning is also in the
+    HTML report and the CSV.
+
+    Args:
+        org_map: the map dict, or None
+        org_map_error: why the map could not be built, or None
+        rows: the map's flattened rows from ``flatten_rows``, passed in so the
+            console, the CSV, and the HTML report render the same rows
     """
     if org_map_error:
         print(f"  Organization map: could not be built — {org_map_error}")
         return
     if not org_map:
         return
-    rows = flatten_rows(org_map)
     totals = org_map.get("totals", {})
     attached = sum(len(row.get("policies") or []) for row in rows)
     print(
@@ -110,6 +117,18 @@ def print_org_map_summary(org_map, org_map_error):
     if not_enabled:
         labels = ", ".join(policy_type_label(p) for p in not_enabled)
         print(f"    Policy types not enabled: {labels}")
+
+    # The totals above count what was read, so say plainly how many nodes
+    # could not be read before listing the individual warnings, which the cap
+    # below may truncate.
+    incomplete_nodes = len(org_map.get("nodeListingErrorPaths") or []) + len(
+        org_map.get("depthTruncatedPaths") or []
+    )
+    if incomplete_nodes:
+        print(
+            f"    Map is INCOMPLETE: {incomplete_nodes} node(s) could not be "
+            "fully listed, so the counts above are lower bounds"
+        )
 
     warnings = [
         f"Attachments may be incomplete for {failure['scope']}: {failure['error']}"
@@ -190,6 +209,11 @@ def run():
     delegated_admins_error = None
     org_map = None
     org_map_error = None
+    org_map_rows = []
+
+    # Organization reads shared across checks are cached for one run, so
+    # start from a clean cache.
+    org_api.reset_cache()
 
     # FR-3.1, FR-3.2: Always run
     checks.append(organization.check_org_exists())
@@ -230,7 +254,10 @@ def run():
 
         # FR-12: Organization and OU account map (informational)
         org_map, org_map_error = get_organization_map()
-        print_org_map_summary(org_map, org_map_error)
+        # Flattened once per run. The console, the CSV, and the HTML report
+        # all render these rows, so they cannot disagree.
+        org_map_rows = flatten_rows(org_map)
+        print_org_map_summary(org_map, org_map_error, org_map_rows)
 
     else:
         print("Running LIMITED assessment (non-management account)...")
@@ -265,6 +292,7 @@ def run():
         delegated_admins_error=delegated_admins_error,
         org_map=org_map,
         org_map_error=org_map_error,
+        org_map_rows=org_map_rows,
     )
     csv_content = generate_csv(checks)
     raw_json = json.dumps(
@@ -288,7 +316,7 @@ def run():
     ]
 
     # FR-12.4: organization map CSV, only when there is a map.
-    org_map_csv = generate_org_map_csv(org_map)
+    org_map_csv = generate_org_map_csv(org_map, org_map_rows)
     if org_map_csv:
         report_files.append(("wafa-org-map.csv", org_map_csv, "text/csv"))
 

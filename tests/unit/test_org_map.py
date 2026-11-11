@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 from botocore.exceptions import ClientError
 
+from src.checks import org_api
 from src.checks.org_map import MAX_OU_DEPTH, flatten_rows, get_organization_map
 
 
@@ -142,7 +143,31 @@ def target(target_id, target_type="ORGANIZATIONAL_UNIT"):
     return {"TargetId": target_id, "Type": target_type, "Name": target_id}
 
 
-def sample_org(**kwargs):
+class CountingOrganizations(FakeOrganizations):
+    """Counts the two organization-level reads ``org_api`` caches.
+
+    ``roots_error_until`` makes the first N ``ListRoots`` calls fail, so a
+    test can prove a failure is not cached.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.describe_calls = 0
+        self.roots_calls = 0
+        self.roots_error_until = 0
+
+    def describe_organization(self):
+        self.describe_calls += 1
+        return super().describe_organization()
+
+    def list_roots(self):
+        self.roots_calls += 1
+        if self.roots_calls <= self.roots_error_until:
+            raise client_error("TooManyRequestsException", "ListRoots")
+        return super().list_roots()
+
+
+def sample_org(cls=FakeOrganizations, **kwargs):
     """A two-level organization with policies attached at several levels."""
     defaults = {
         "ous": {
@@ -180,7 +205,7 @@ def sample_org(**kwargs):
         },
     }
     defaults.update(kwargs)
-    return FakeOrganizations(**defaults)
+    return cls(**defaults)
 
 
 def run_map(fake):
@@ -303,6 +328,100 @@ class TestOrganizationMapStructure:
         data, _ = run_map(sample_org())
         assert "depthTruncated" not in data
         assert "depthTruncatedPaths" not in data
+
+
+class TestMapLevelListingFailures:
+    """A per-node note is not enough on its own.
+
+    The totals count what was read, and the affected row can be filtered out
+    or on a later page of the report table, so a failed listing is also
+    recorded at map level.
+    """
+
+    def test_denied_account_listing_is_recorded_at_map_level(self):
+        fake = sample_org(
+            account_errors={"ou-sec": client_error("AccessDeniedException")}
+        )
+        data, error = run_map(fake)
+
+        assert error is None
+        assert data["nodeListingErrors"] is True
+        assert data["nodeListingErrorPaths"] == ["Root/Security"]
+        # The explanation stays on the node.
+        assert (
+            "AccessDeniedException"
+            in find_node(data["root"], "ou-sec")["accountsError"]
+        )
+
+    def test_unreadable_child_ou_is_recorded_at_map_level(self):
+        fake = sample_org(ou_errors={"ou-wl": client_error("ThrottlingException")})
+        data, _ = run_map(fake)
+
+        assert data["nodeListingErrorPaths"] == ["Root/Workloads"]
+
+    def test_a_node_failing_both_listings_is_recorded_once(self):
+        fake = sample_org(
+            account_errors={"ou-sec": client_error("AccessDeniedException")},
+            ou_errors={"ou-sec": client_error("AccessDeniedException")},
+        )
+        data, _ = run_map(fake)
+
+        assert data["nodeListingErrorPaths"] == ["Root/Security"]
+
+    def test_every_failed_node_is_named(self):
+        fake = sample_org(
+            account_errors={
+                "ou-sec": client_error("AccessDeniedException"),
+                "ou-prod": client_error("ThrottlingException"),
+            }
+        )
+        data, _ = run_map(fake)
+
+        assert data["nodeListingErrorPaths"] == [
+            "Root/Security",
+            "Root/Workloads/Prod",
+        ]
+
+    def test_a_complete_map_has_no_listing_flag(self):
+        data, _ = run_map(sample_org())
+
+        assert "nodeListingErrors" not in data
+        assert "nodeListingErrorPaths" not in data
+
+
+class TestSharedOrganizationReads:
+    """DescribeOrganization and ListRoots are read once per run (org_api)."""
+
+    def test_the_map_adds_no_describe_or_listroots_call_of_its_own(self):
+        fake = sample_org(cls=CountingOrganizations)
+
+        with patch("src.checks.org_map.boto3.client", return_value=fake):
+            # Stands in for an organization check that already read the root.
+            org_api.describe_organization(fake)
+            org_api.list_roots(fake)
+            data, error = get_organization_map()
+
+        assert error is None
+        assert data["organizationId"] == "o-example12345"
+        assert fake.describe_calls == 1
+        assert fake.roots_calls == 1
+
+    def test_a_failed_read_is_not_cached(self):
+        """One denied read must not become an error for every later check."""
+        fake = sample_org(cls=CountingOrganizations)
+        fake.roots_error_until = 1
+
+        with pytest.raises(ClientError):
+            org_api.list_roots(fake)
+        assert org_api.list_roots(fake)[0]["Id"] == "r-root"
+        assert fake.roots_calls == 2
+
+    def test_reset_cache_drops_the_cached_reads(self):
+        org_api.list_roots(sample_org())
+        org_api.reset_cache()
+
+        other = FakeOrganizations(roots=[{"Id": "r-other", "Name": "Other"}])
+        assert org_api.list_roots(other)[0]["Id"] == "r-other"
 
 
 class TestConcurrentWalk:

@@ -12,6 +12,9 @@ The map records, for the organization root and every OU beneath it:
 - the OU hierarchy, as a nested tree
 - which accounts sit directly in each OU, including suspended ones
 - the policies attached *directly* to that root, OU, or account
+- every reason the map may be incomplete: on the node it affects, and as a
+  map-level list of the affected paths so no output can present a partial map
+  as a whole one
 
 Policy attachments are collected by enumerating the organization's policies and
 asking where each one is attached (``ListPolicies`` then
@@ -48,6 +51,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+
+from src.checks import org_api
 
 # AWS Organizations allows five levels of OU nesting below the root. The guard
 # bounds recursion rather than trusting the service limit.
@@ -104,28 +109,6 @@ def _account_entry(account):
     }
 
 
-def _list_child_accounts(client, parent_id):
-    """List accounts directly under a root or OU, fully paginated."""
-    accounts = []
-    paginator = client.get_paginator("list_accounts_for_parent")
-    for page in paginator.paginate(ParentId=parent_id):
-        accounts.extend(page.get("Accounts", []))
-    return accounts
-
-
-def list_child_ous(client, parent_id):
-    """List OUs directly under a root or OU, fully paginated.
-
-    Takes an existing client so the caller owns client creation; shared with
-    ``src.checks.organization`` rather than duplicating the pagination loop.
-    """
-    ous = []
-    paginator = client.get_paginator("list_organizational_units_for_parent")
-    for page in paginator.paginate(ParentId=parent_id):
-        ous.extend(page.get("OrganizationalUnits", []))
-    return ous
-
-
 def _new_node(node_id, name, node_type, path, depth, stats):
     """Create an empty tree node and record its depth."""
     stats["max_depth"] = max(stats["max_depth"], depth)
@@ -164,8 +147,8 @@ def _build_tree(client, root_id, root_name, stats):
             pending = [
                 (
                     node,
-                    executor.submit(_list_child_accounts, client, node["id"]),
-                    executor.submit(list_child_ous, client, node["id"]),
+                    executor.submit(org_api.list_child_accounts, client, node["id"]),
+                    executor.submit(org_api.list_child_ous, client, node["id"]),
                 )
                 for node in level
             ]
@@ -176,6 +159,10 @@ def _build_tree(client, root_id, root_name, stats):
                     accounts = [_account_entry(a) for a in accounts_future.result()]
                 except Exception as e:
                     node["accountsError"] = str(e)
+                    # Also recorded at map level, because the totals below
+                    # would otherwise read as a complete, smaller
+                    # organization and this node's note may be out of view.
+                    stats["listing_error_paths"].append(node["path"])
                 else:
                     accounts.sort(key=lambda a: (a["name"].lower(), a["id"]))
                     node["accounts"] = accounts
@@ -185,6 +172,8 @@ def _build_tree(client, root_id, root_name, stats):
                     child_ous = ous_future.result()
                 except Exception as e:
                     node["childrenError"] = str(e)
+                    if node["path"] not in stats["listing_error_paths"]:
+                        stats["listing_error_paths"].append(node["path"])
                     continue
 
                 if child_ous and node["depth"] >= MAX_OU_DEPTH:
@@ -310,6 +299,26 @@ def _list_targets_for_policy(client, policy_id):
     return targets
 
 
+def _lookup_error(scope, exc):
+    """Describe one failed policy lookup, choosing the message by error code.
+
+    A single handler for every failure, so no branch can be added later that
+    swallows one instead of reporting it.
+    """
+    code = ""
+    if isinstance(exc, ClientError):
+        code = exc.response.get("Error", {}).get("Code", "")
+    if code in _POLICY_TYPE_CONTRADICTION_CODES:
+        return {
+            "scope": scope,
+            "error": (
+                "The organization root reports this policy type as ENABLED, "
+                f"but listing its policies failed: {exc}"
+            ),
+        }
+    return {"scope": scope, "error": str(exc)}
+
+
 def _attach_policies(client, root, policy_types):
     """Attach directly-attached policies to the tree.
 
@@ -344,24 +353,8 @@ def _attach_policies(client, root, policy_types):
             policy_type = futures[future]
             try:
                 policies.extend(future.result())
-            except ClientError as e:
-                if (
-                    e.response.get("Error", {}).get("Code")
-                    in _POLICY_TYPE_CONTRADICTION_CODES
-                ):
-                    errors.append(
-                        {
-                            "scope": policy_type,
-                            "error": (
-                                "The organization root reports this policy type as "
-                                f"ENABLED, but listing its policies failed: {e}"
-                            ),
-                        }
-                    )
-                    continue
-                errors.append({"scope": policy_type, "error": str(e)})
             except Exception as e:
-                errors.append({"scope": policy_type, "error": str(e)})
+                errors.append(_lookup_error(policy_type, e))
 
     # One call per policy. Account-level attachments arrive here too, so they
     # cost nothing extra.
@@ -384,12 +377,7 @@ def _attach_policies(client, root, policy_types):
             try:
                 attached_to = future.result()
             except Exception as e:
-                errors.append(
-                    {
-                        "scope": f"{summary['type']}: {summary['name']}",
-                        "error": str(e),
-                    }
-                )
+                errors.append(_lookup_error(f"{summary['type']}: {summary['name']}", e))
                 continue
             for target in attached_to:
                 container = targets_by_id.get(target.get("TargetId"))
@@ -417,12 +405,16 @@ def get_organization_map():
         "accounts": 0,
         "max_depth": 0,
         "truncated_paths": [],
+        "listing_error_paths": [],
     }
     try:
         client = boto3.client("organizations", config=_CLIENT_CONFIG)
-        organization = client.describe_organization().get("Organization", {})
+        # Both reads are shared with the organization checks and answered once
+        # per run, so building the map adds no DescribeOrganization or
+        # ListRoots call of its own.
+        organization = org_api.describe_organization(client)
 
-        roots = client.list_roots().get("Roots", [])
+        roots = org_api.list_roots(client)
         if not roots:
             return None, "ListRoots returned no organization root."
         root = roots[0]
@@ -454,12 +446,16 @@ def get_organization_map():
                 "maxDepth": stats["max_depth"],
             },
         }
+        # Map-level fields locate an incomplete map; the affected node carries
+        # the explanation. Without them the totals above read as a complete,
+        # smaller organization, and the only sign would be a note on a row
+        # that may be filtered out or on a later page of the report table.
         if stats["truncated_paths"]:
-            # The flag summarizes; the paths locate. Each truncated node also
-            # carries its own ``childrenTruncated`` note, so no output has to
-            # restate the condition at map level to say where it happened.
             data["depthTruncated"] = True
             data["depthTruncatedPaths"] = sorted(stats["truncated_paths"])
+        if stats["listing_error_paths"]:
+            data["nodeListingErrors"] = True
+            data["nodeListingErrorPaths"] = sorted(stats["listing_error_paths"])
         return data, None
 
     except ClientError as e:

@@ -5,6 +5,7 @@ import io
 
 import pytest
 
+from src.checks.org_map import flatten_rows
 from src.report.csv_export import generate_csv, generate_org_map_csv
 from src.report.policy_labels import policy_type_label
 
@@ -94,7 +95,7 @@ def org_map(root=None, **overrides):
 
 
 def rows_for(data):
-    return list(csv.reader(io.StringIO(generate_org_map_csv(data))))
+    return list(csv.reader(io.StringIO(generate_org_map_csv(data, flatten_rows(data)))))
 
 
 class TestPolicyTypeLabel:
@@ -166,14 +167,15 @@ class TestOrgMapCsv:
         root = org_map()["root"]
         root["name"] = 'Prod, "Core"'
         root["path"] = 'Prod, "Core"'
-        content = generate_org_map_csv(org_map(root=root))
+        data = org_map(root=root)
+        content = generate_org_map_csv(data, flatten_rows(data))
         # Round-trips through the csv module without corrupting the row.
         parsed = list(csv.reader(io.StringIO(content)))
         assert parsed[1][2] == 'Prod, "Core"'
 
     def test_empty_without_a_map(self):
-        assert generate_org_map_csv(None) == ""
-        assert generate_org_map_csv({}) == ""
+        assert generate_org_map_csv(None, flatten_rows(None)) == ""
+        assert generate_org_map_csv({}, flatten_rows({})) == ""
 
 
 class TestFormulaInjection:
@@ -206,6 +208,28 @@ class TestFormulaInjection:
         rows = rows_for(org_map())
         assert rows[1][2] == "Root"
         assert rows[1][6] == "FullAWSAccess"
+
+    @pytest.mark.parametrize("prefix", [" ", "\t", "  \u00a0"])
+    def test_neutralizes_a_formula_behind_leading_whitespace(self, prefix):
+        """A spreadsheet still parses the formula; only the test would miss it."""
+        root = org_map()["root"]
+        root["name"] = f'{prefix}=HYPERLINK("http://evil","click")'
+        assert rows_for(org_map(root=root))[1][2].startswith("'")
+
+    @pytest.mark.parametrize("number", ["-1", "+2.5", "-0.0", " -42 "])
+    def test_leaves_a_signed_number_alone(self, number):
+        """Escaping a number alters the value for no security benefit.
+
+        It would also no longer match the same value in wafa-raw.json.
+        """
+        root = org_map()["root"]
+        root["name"] = number
+        assert rows_for(org_map(root=root))[1][2] == number
+
+    def test_still_escapes_a_number_like_formula(self):
+        root = org_map()["root"]
+        root["name"] = "-1+cmd|' /c calc'!A0"
+        assert rows_for(org_map(root=root))[1][2].startswith("'")
 
     def test_guards_the_checks_csv_error_column_too(self):
         """Check error text is AWS-provided and lands in a cell as well."""
@@ -240,11 +264,13 @@ class TestPartialMapIsFlagged:
         assert "INSPECTOR_POLICY" in root_error
         assert "TooManyRequestsException" in root_error
 
-    def test_depth_truncation_is_reported_only_on_the_truncated_node(self):
-        """A localizable warning belongs to its own row, and only there.
+    def test_depth_truncation_is_summarized_at_the_root_and_explained_on_the_node(
+        self,
+    ):
+        """The root row locates it; the affected row explains it.
 
-        The truncated OU's own Error cell says where the walk stopped, so
-        repeating it on the root row would report the same condition twice.
+        A reader who sees only the first row must know the map is partial, and
+        must be able to find where — but the message itself is not repeated.
         """
         root = org_map()["root"]
         cut_off = root["children"][0]
@@ -256,10 +282,35 @@ class TestPartialMapIsFlagged:
         )
         rows = rows_for(data)
 
-        assert rows[1][9] == ""
-        truncated = [row for row in rows[1:] if row[9]]
-        assert [row[3] for row in truncated] == [cut_off["id"]]
-        assert "Walk stopped at the limit" in truncated[0][9]
+        root_error = rows[1][9]
+        assert "Incomplete" in root_error
+        assert cut_off["path"] in root_error
+        # A locator, not a copy of the row's own message.
+        assert "Walk stopped at the limit" not in root_error
+
+        node_row = next(row for row in rows[1:] if row[3] == cut_off["id"])
+        assert node_row[9] == "Walk stopped at the limit"
+
+    def test_failed_node_listings_are_summarized_at_the_root(self):
+        """Otherwise the totals read as a smaller, complete organization."""
+        root = org_map()["root"]
+        failed = root["children"][0]
+        failed["accountsError"] = "AccessDeniedException"
+        data = org_map(
+            root=root,
+            nodeListingErrors=True,
+            nodeListingErrorPaths=[failed["path"]],
+        )
+        rows = rows_for(data)
+
+        root_error = rows[1][9]
+        assert "Incomplete" in root_error
+        assert "could not be fully listed" in root_error
+        assert failed["path"] in root_error
+        assert "AccessDeniedException" not in root_error
+
+        node_row = next(row for row in rows[1:] if row[3] == failed["id"])
+        assert node_row[9] == "AccessDeniedException"
 
     def test_map_warnings_do_not_displace_a_node_note(self):
         root = org_map()["root"]

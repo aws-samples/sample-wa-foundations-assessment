@@ -593,6 +593,7 @@ function OrganizationMap({ map, rows, notEnabled, error }) {
   const totals = (map && map.totals) || {};
   const policyErrors = (map && map.policyLookupErrors) || [];
   const truncatedPaths = (map && map.depthTruncatedPaths) || [];
+  const listingErrorPaths = (map && map.nodeListingErrorPaths) || [];
   // Paged and filtered, because a large organization renders thousands of
   // rows otherwise. Not sorted: the row order is the hierarchy. Each row shows
   // its OU path, so a row stays locatable when its ancestors are on another
@@ -645,6 +646,14 @@ function OrganizationMap({ map, rows, notEnabled, error }) {
               <Alert type="info" header="Guardrail policy types not enabled">
                 {notEnabled.join(" and ")} not enabled in this
                 organization, so no policies of {notEnabled.length > 1 ? "those types" : "that type"} can be attached at any level.
+              </Alert>
+            )}
+            {listingErrorPaths.length > 0 && (
+              <Alert type="warning" header="Some OUs could not be fully listed">
+                The counts above are lower bounds. Listing the accounts or child
+                OUs of {listingErrorPaths.join(", ")} failed, so this
+                organization may be larger than shown. Those rows carry the
+                reason in the table.
               </Alert>
             )}
             {truncatedPaths.length > 0 && (

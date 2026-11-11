@@ -39,6 +39,7 @@ function orgMapSummary(overrides = {}) {
     totals: { organizationalUnits: 1, accounts: 2, maxDepth: 1 },
     policyLookupErrors: [],
     depthTruncatedPaths: [],
+    nodeListingErrorPaths: [],
     ...overrides,
   };
 }
@@ -51,7 +52,7 @@ function orgMapRows(overrides = []) {
     ? overrides
     : [
         {
-          key: "root:r-root",
+          key: "0:root:r-root",
           kind: "root",
           name: "Root",
           id: "r-root",
@@ -70,7 +71,7 @@ function orgMapRows(overrides = []) {
           ],
         },
         {
-          key: "account:111111111111",
+          key: "1:account:111111111111",
           kind: "account",
           name: "Management",
           id: "111111111111",
@@ -81,7 +82,7 @@ function orgMapRows(overrides = []) {
           policies: [],
         },
         {
-          key: "ou:ou-sec",
+          key: "2:ou:ou-sec",
           kind: "ou",
           name: "Security",
           id: "ou-sec",
@@ -100,7 +101,7 @@ function orgMapRows(overrides = []) {
           ],
         },
         {
-          key: "account:333333333333",
+          key: "3:account:333333333333",
           kind: "account",
           name: "Audit",
           id: "333333333333",
@@ -475,6 +476,30 @@ describe("report UI", () => {
     expect(section).toContain("Attached policies may be incomplete");
     expect(section).toContain("INSPECTOR_POLICY");
     expect(section).toContain("TooManyRequestsException");
+  });
+
+  it("warns at map level when a node's listing failed", () => {
+    // The row's own note may be filtered out or on a later page, and the
+    // header totals would read as a complete, smaller organization.
+    const rows = orgMapRows();
+    rows[2].note = "AccessDenied listing accounts";
+    const { container } = renderReport({
+      organization_map_summary: orgMapSummary({
+        nodeListingErrorPaths: ["Root/Security"],
+      }),
+      organization_map_rows: rows,
+    });
+    const section = container.querySelector("#org-map").textContent;
+    expect(section).toContain("could not be fully listed");
+    expect(section).toContain("lower bounds");
+    expect(section).toContain("Root/Security");
+  });
+
+  it("does not warn about listing failures on a complete map", () => {
+    const { container } = renderReport();
+    expect(container.querySelector("#org-map").textContent).not.toContain(
+      "could not be fully listed",
+    );
   });
 
   it("names the OUs where the hierarchy walk stopped", () => {

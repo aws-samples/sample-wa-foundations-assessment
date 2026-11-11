@@ -4,7 +4,7 @@
 
 ![License: MIT-0](https://img.shields.io/badge/License-MIT--0-yellow.svg)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
-![Tests](https://img.shields.io/badge/tests-302%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-322%20passing-brightgreen.svg)
 
 WAFA is an open-source AWS foundations assessment tool. Its assessment checks
 use read, list, and describe APIs to evaluate organization-level configuration
@@ -521,14 +521,14 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 
-# Run tests (302 tests)
+# Run tests (322 tests)
 python -m pytest tests/unit/ -v
 
 # Run with coverage
 python -m pytest tests/unit/ --cov=src --cov-report=term-missing
 ```
 
-The current suite contains 302 tests and reports 97% statement coverage.
+The current suite contains 322 tests and reports 98% statement coverage.
 
 ### Report UI
 
@@ -602,7 +602,8 @@ sample-wa-foundations-assessment/
 │   │   ├── account_resources.py # FR-7/8: Account resources (8 checks)
 │   │   ├── delegated_admin.py   # FR-9: Informational admins
 │   │   ├── maturity.py          # FR-11: Level 1–5 scoring
-│   │   └── org_map.py           # FR-12: Informational OU/account map
+│   │   ├── org_map.py           # FR-12: Informational OU/account map
+│   │   └── org_api.py           # Shared Organizations reads, cached per run
 │   └── report/
 │       ├── html_report.py       # HTML shell and report data payload
 │       ├── assets/              # Built Cloudscape UI bundle (generated)
@@ -610,7 +611,7 @@ sample-wa-foundations-assessment/
 ├── report-ui/                   # Cloudscape React source for the HTML report
 ├── scripts/                     # Sample report generator
 ├── sample-reports/              # Generated sample report, checks, and org map
-├── tests/unit/                  # 302 pytest tests, 97% coverage
+├── tests/unit/                  # 322 pytest tests, 98% coverage
 ├── deployment/
 │   └── wafa-stack.yaml          # CloudFormation template
 ├── deploy.sh                    # Deployment script

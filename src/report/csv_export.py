@@ -12,23 +12,57 @@ messages in either file.
 import csv
 import io
 
-from src.checks.org_map import flatten_rows
 from src.report.policy_labels import policy_type_label
 
 # A spreadsheet treats a cell starting with any of these as a formula, so a
 # value such as "=cmd|' /c calc'!A0" taken from an AWS resource name would
 # execute on open. Prefixing with an apostrophe makes the cell literal text.
-_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+_FORMULA_TRIGGERS = ("=", "+", "-", "@")
+
+# Leading whitespace does not stop a spreadsheet from parsing a formula, so
+# " =HYPERLINK(...)" is the same payload as "=HYPERLINK(...)". Strip these
+# before looking for a trigger.
+_LEADING_NOISE = " \t\r\n\v\f\u00a0"
+
+# A cell that *starts* with one of these is escaped whatever follows it: a tab
+# or a carriage return at the front of a cell is a row and column separator in
+# its own right, so it can break a row apart rather than just carry a formula.
+_STRUCTURE_TRIGGERS = ("\t", "\r", "\n")
+
+
+def _is_number(text):
+    """True when the cell is a plain number, formula triggers notwithstanding.
+
+    Keeps the escaping from touching a legitimate negative or signed numeric
+    value, which a reader would otherwise find altered relative to the raw
+    JSON for no security benefit.
+    """
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
 
 
 def _csv_safe(value):
-    """Neutralize spreadsheet formula injection in a single cell."""
+    """Neutralize spreadsheet formula injection in a single cell.
+
+    Applies to every CSV this module writes: AWS-provided text reaches both
+    files — OU and account names in the organization map, and API error
+    messages in either — and an escaped cell is the intended, visible
+    difference from the raw JSON for a value that would otherwise execute.
+    """
     if value is None:
         return ""
     text = value if isinstance(value, str) else str(value)
-    if text.startswith(_FORMULA_TRIGGERS):
+    if text.startswith(_STRUCTURE_TRIGGERS):
         return "'" + text
-    return text
+    stripped = text.lstrip(_LEADING_NOISE)
+    if not stripped.startswith(_FORMULA_TRIGGERS):
+        return text
+    if _is_number(stripped):
+        return text
+    return "'" + text
 
 
 def _write_row(writer, values):
@@ -107,43 +141,58 @@ def _other_policy_names(policies):
 
 
 def _map_level_warnings(org_map):
-    """Warnings that apply to the whole map rather than one node.
+    """Warnings a reader must see before trusting the map as a whole (FR-12.3).
 
-    These reach the CSV so that a reader who opens only the spreadsheet cannot
-    mistake an incomplete map for a complete one (FR-12.3).
+    A policy lookup fails per policy type or per policy, so it has no row of
+    its own and the message belongs here.
 
-    Only conditions that cannot be attributed to one row belong here. A policy
-    lookup fails per type or per policy, so it has no row of its own. A walk
-    stopped at the nesting limit does: it is reported in that OU's own Error
-    cell through its ``childrenTruncated`` note, so restating it here would
-    report the same condition twice.
+    A failed node listing and a walk stopped at the nesting limit do have a
+    row. Those are summarized here as a count and the affected paths, and the
+    message itself stays in that row's own Error cell. Someone who opens only
+    the spreadsheet then cannot read a partial map as a complete one, and no
+    condition is spelled out twice.
     """
-    return [
+    warnings = [
         f"Attached policies may be incomplete for {failure.get('scope', '')}: "
         f"{failure.get('error', '')}"
         for failure in org_map.get("policyLookupErrors") or []
     ]
+    listing_errors = org_map.get("nodeListingErrorPaths") or []
+    if listing_errors:
+        warnings.append(
+            f"Incomplete: {len(listing_errors)} node(s) could not be fully "
+            f"listed, see their own Error cell ({', '.join(listing_errors)})"
+        )
+    truncated = org_map.get("depthTruncatedPaths") or []
+    if truncated:
+        warnings.append(
+            f"Incomplete: the walk stopped below {len(truncated)} node(s), "
+            f"see their own Error cell ({', '.join(truncated)})"
+        )
+    return warnings
 
 
-def generate_org_map_csv(org_map):
+def generate_org_map_csv(org_map, rows):
     """Generate CSV content for the organization and OU account map.
 
     One row per root, OU, and account. Policy columns list only the policies
     attached *directly* to that row's target, never inherited ones, so an empty
     cell means "nothing attached here" rather than "nothing applies".
 
-    Warnings that belong to no single row, such as a failed policy lookup, are
-    written into the root row's Error cell, so the spreadsheet never presents an
-    incomplete map as a complete one. Anything attributable to one OU, such as a
-    walk stopped at the nesting limit, is reported in that OU's own Error cell.
+    Every reason the map may be incomplete reaches the root row's Error cell,
+    so the spreadsheet never presents a partial map as a complete one. A
+    condition that belongs to one row is summarized there as a count plus the
+    affected paths, and explained in that row's own Error cell.
 
     Args:
         org_map: the map dict from ``src.checks.org_map.get_organization_map``
+        rows: the flattened rows from ``flatten_rows``. Passed in so the
+            console, this CSV, and the HTML report all render the same rows
+            from one flattening per run.
 
     Returns:
         str: CSV content, or an empty string when there is no map.
     """
-    rows = flatten_rows(org_map)
     if not rows:
         return ""
 

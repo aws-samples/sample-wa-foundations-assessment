@@ -106,7 +106,7 @@ def _make_org_map():
 def _write_org_map_artifacts(tmp_path, org_map):
     """Write the FR-12 organization map CSV the sample verifier expects."""
     (tmp_path / "wafa-org-map.csv").write_text(
-        generate_org_map_csv(org_map), encoding="utf-8"
+        generate_org_map_csv(org_map, flatten_rows(org_map)), encoding="utf-8"
     )
 
 
@@ -289,8 +289,15 @@ class TestGenerateHtml:
         org_map = _make_org_map()
         org_map["depthTruncated"] = True
         org_map["depthTruncatedPaths"] = ["Root/Workloads/Production"]
+        org_map["nodeListingErrors"] = True
+        org_map["nodeListingErrorPaths"] = ["Root/Workloads"]
         data = _report_data(
-            generate_html(_make_checks(), _make_maturity(), org_map=org_map)
+            generate_html(
+                _make_checks(),
+                _make_maturity(),
+                org_map=org_map,
+                org_map_rows=flatten_rows(org_map),
+            )
         )
 
         assert "organization_map" not in data
@@ -299,11 +306,45 @@ class TestGenerateHtml:
             "totals": org_map["totals"],
             "policyLookupErrors": [],
             "depthTruncatedPaths": ["Root/Workloads/Production"],
+            "nodeListingErrorPaths": ["Root/Workloads"],
         }
         # Nothing the UI renders is lost: the rows still cover every node.
         rows = data["organization_map_rows"]
         assert len(rows) == len(flatten_rows(org_map))
-        assert rows[0]["key"] == "root:r-root"
+        assert rows[0]["key"] == "0:root:r-root"
+
+    def test_report_data_row_keys_are_unique_without_ids(self):
+        """An AWS id defaults to "", so a key built from it alone collides.
+
+        React then renders duplicate or wrong rows once the table is filtered
+        or paged.
+        """
+        org_map = _make_org_map()
+        for node in org_map["root"]["children"]:
+            node["id"] = ""
+        org_map["root"]["children"].append(
+            {
+                "id": "",
+                "name": "Another nameless OU",
+                "type": "ORGANIZATIONAL_UNIT",
+                "path": "Root/Another nameless OU",
+                "depth": 1,
+                "policies": [],
+                "accounts": [{"id": "", "name": "No id", "status": "", "policies": []}],
+                "children": [],
+            }
+        )
+        data = _report_data(
+            generate_html(
+                _make_checks(),
+                _make_maturity(),
+                org_map=org_map,
+                org_map_rows=flatten_rows(org_map),
+            )
+        )
+
+        keys = [row["key"] for row in data["organization_map_rows"]]
+        assert len(keys) == len(set(keys))
 
     def test_report_data_has_no_map_summary_without_a_map(self):
         data = _report_data(generate_html(_make_checks(), _make_maturity()))
@@ -455,7 +496,10 @@ class TestGenerateCsv:
         }
 
         (tmp_path / "wafa-report.html").write_text(
-            generate_html(checks, maturity, org_map=org_map), encoding="utf-8"
+            generate_html(
+                checks, maturity, org_map=org_map, org_map_rows=flatten_rows(org_map)
+            ),
+            encoding="utf-8",
         )
         (tmp_path / "wafa-raw.json").write_text(
             json.dumps(raw, indent=2) + "\n", encoding="utf-8"
@@ -498,7 +542,14 @@ class TestGenerateCsv:
         raw_path = tmp_path / "wafa-raw.json"
         raw_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
         (tmp_path / "wafa-report.html").write_text(
-            generate_html(checks, maturity, admins, account_info, org_map=org_map),
+            generate_html(
+                checks,
+                maturity,
+                admins,
+                account_info,
+                org_map=org_map,
+                org_map_rows=flatten_rows(org_map),
+            ),
             encoding="utf-8",
         )
         _write_org_map_artifacts(tmp_path, org_map)

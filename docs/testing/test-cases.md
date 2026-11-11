@@ -359,6 +359,11 @@ For each, set up the "good" and "bad" state and confirm status flips correctly.
   row, each row shows its OU path so a row on page 2 is still locatable, and the filter
   finds an account by name or ID. The table must not be sortable — the row order is the
   hierarchy.
+- **A failed listing is visible without finding the row (FR-12.6):** deny
+  `ListAccountsForParent` for one OU, then check the report shows an Alert above the table
+  saying the counts are lower bounds and naming that OU, the CSV root row says the same,
+  and the console prints the count. Filter the table so the affected row is hidden and
+  confirm the Alert is still there — a row note alone is not sufficient.
 
 ### E13. Policy type coverage in the map (FR-12.3)
 - With RCPs not enabled, confirm the section states that RCP is not enabled rather
@@ -467,12 +472,15 @@ Owner: ____
 - **Formula injection:** if any OU or account name begins with `=`, `+`, `-` or `@`,
   confirm the cell is prefixed with an apostrophe and the spreadsheet shows it as
   literal text rather than evaluating it.
-- **Partial maps are flagged:** when a policy lookup was denied or throttled, the root
-  row's Error cell says so, because that failure belongs to a policy type rather than to
-  any one row. A warning that does belong to one row — a denied account listing, an
-  unreadable child OU, or a walk stopped at the nesting limit — appears in that row's own
-  Error cell and nowhere else. An incomplete map must never look complete in the
-  spreadsheet, and no condition should be reported twice.
+- **Partial maps are flagged (FR-12.6):** the root row's Error cell must say the map is
+  incomplete in every case — a denied or throttled policy lookup (full message, since it
+  belongs to no row), a failed account or child-OU listing, or a walk stopped at the
+  nesting limit (a count plus the affected paths). The affected row's own Error cell
+  carries the explanation. Check both: an incomplete map must never look complete to
+  someone reading only the first row, and the same sentence must not appear twice.
+- **Formula escaping is narrow and complete:** a name of `" =HYPERLINK(...)"` with a
+  leading space is still escaped, and a plain signed number such as `-1` is left alone so
+  it still matches `wafa-raw.json`.
 
 ---
 

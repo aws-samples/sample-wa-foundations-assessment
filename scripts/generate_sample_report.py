@@ -373,7 +373,7 @@ def _verify_org_map_outputs(out_dir, org_map):
     path = os.path.join(out_dir, "wafa-org-map.csv")
     if not os.path.isfile(path):
         problems.append("wafa-org-map.csv was not generated")
-    elif _read(path) != generate_org_map_csv(org_map):
+    elif _read(path) != generate_org_map_csv(org_map, rows):
         problems.append("wafa-org-map.csv differs from the generated organization map")
 
     return problems
@@ -399,14 +399,17 @@ def _verify_html_org_map(data, raw_map):
         problems.append("HTML report data is missing organization_map_summary")
         return problems
 
-    expected = {
-        "organizationId": raw_map.get("organizationId", ""),
-        "totals": raw_map.get("totals") or {},
-        "policyLookupErrors": raw_map.get("policyLookupErrors") or [],
-        "depthTruncatedPaths": raw_map.get("depthTruncatedPaths") or [],
-    }
-    if summary != expected:
-        problems.append("HTML organization_map_summary differs from wafa-raw.json")
+    # Every summary key is named after the field it mirrors in the map, so
+    # compare by name rather than listing the fields here, which would go
+    # stale the next time one is added.
+    for key, value in summary.items():
+        expected = raw_map.get(key)
+        if expected is None:
+            expected = "" if isinstance(value, str) else type(value)()
+        if value != expected:
+            problems.append(
+                f"HTML organization_map_summary {key} differs from wafa-raw.json"
+            )
     if len(data.get("organization_map_rows") or []) != len(flatten_rows(raw_map)):
         problems.append("HTML organization_map_rows do not cover the whole map")
     return problems

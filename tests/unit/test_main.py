@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from src.checks.org_map import flatten_rows
 from src.main import (
     MAX_ORG_MAP_CONSOLE_WARNINGS,
     exit_code,
@@ -1458,9 +1459,18 @@ def _summary_map(**overrides):
     return data
 
 
+def _print_summary(data, error=None):
+    """Print the console summary with the rows the orchestrator would pass.
+
+    ``run()`` flattens the map once and hands the same rows to the console,
+    the CSV, and the HTML report, so the tests exercise it the same way.
+    """
+    print_org_map_summary(data, error, flatten_rows(data))
+
+
 class TestPrintOrgMapSummary:
     def test_prints_totals_and_attachment_count(self, capsys):
-        print_org_map_summary(_summary_map(), None)
+        _print_summary(_summary_map())
         out = capsys.readouterr().out
         assert "1 OUs" in out
         assert "1 accounts" in out
@@ -1468,7 +1478,7 @@ class TestPrintOrgMapSummary:
 
     def test_reports_policy_types_not_enabled(self, capsys):
         """The console uses the same display labels as the CSV and the HTML."""
-        print_org_map_summary(_summary_map(), None)
+        _print_summary(_summary_map())
         out = capsys.readouterr().out
         assert "Policy types not enabled: RCP" in out
         assert "RESOURCE_CONTROL_POLICY" not in out
@@ -1480,7 +1490,7 @@ class TestPrintOrgMapSummary:
             ]
         )
         out = capsys.readouterr().out
-        print_org_map_summary(data, None)
+        _print_summary(data)
         out = capsys.readouterr().out
         assert "may be incomplete" in out
         assert "INSPECTOR_POLICY" in out
@@ -1490,7 +1500,7 @@ class TestPrintOrgMapSummary:
         """Without this the totals read as a complete, smaller organization."""
         data = _summary_map()
         data["root"]["accountsError"] = "AccessDeniedException"
-        print_org_map_summary(data, None)
+        _print_summary(data)
         out = capsys.readouterr().out
         assert "AccessDeniedException" in out
         assert "Root" in out
@@ -1498,14 +1508,31 @@ class TestPrintOrgMapSummary:
     def test_reports_an_unreadable_child_ou(self, capsys):
         data = _summary_map()
         data["root"]["childrenError"] = "ThrottlingException"
-        print_org_map_summary(data, None)
+        _print_summary(data)
         assert "ThrottlingException" in capsys.readouterr().out
 
     def test_reports_a_truncated_walk(self, capsys):
         data = _summary_map()
         data["root"]["childrenTruncated"] = "Walk stopped at the 5-level limit"
-        print_org_map_summary(data, None)
+        _print_summary(data)
         assert "Walk stopped" in capsys.readouterr().out
+
+    def test_states_that_the_counts_are_lower_bounds(self, capsys):
+        """The totals count what was read, so say when a node was not read."""
+        data = _summary_map(
+            nodeListingErrors=True,
+            nodeListingErrorPaths=["Root/Security"],
+            depthTruncatedPaths=["Root/Deep"],
+        )
+        _print_summary(data)
+        out = capsys.readouterr().out
+
+        assert "Map is INCOMPLETE: 2 node(s)" in out
+        assert "lower bounds" in out
+
+    def test_a_complete_map_is_not_called_incomplete(self, capsys):
+        _print_summary(_summary_map())
+        assert "INCOMPLETE" not in capsys.readouterr().out
 
     def test_caps_warning_lines_and_states_the_withheld_count(self, capsys):
         """A throttled large organization must not bury the check results."""
@@ -1513,7 +1540,7 @@ class TestPrintOrgMapSummary:
             {"scope": f"TAG_POLICY: policy-{index}", "error": "TooManyRequests"}
             for index in range(MAX_ORG_MAP_CONSOLE_WARNINGS + 7)
         ]
-        print_org_map_summary(_summary_map(policyLookupErrors=failures), None)
+        _print_summary(_summary_map(policyLookupErrors=failures))
         out = capsys.readouterr().out
 
         printed = [line for line in out.splitlines() if "may be incomplete" in line]
@@ -1526,7 +1553,7 @@ class TestPrintOrgMapSummary:
             policyLookupErrors=[{"scope": "TAG_POLICY", "error": "Denied"}]
         )
         data["root"]["accountsError"] = "AccessDeniedException"
-        print_org_map_summary(data, None)
+        _print_summary(data)
         out = capsys.readouterr().out
 
         assert "TAG_POLICY" in out
@@ -1534,11 +1561,11 @@ class TestPrintOrgMapSummary:
         assert "more organization map warning" not in out
 
     def test_reports_a_map_that_could_not_be_built(self, capsys):
-        print_org_map_summary(None, "AccessDeniedException")
+        print_org_map_summary(None, "AccessDeniedException", [])
         out = capsys.readouterr().out
         assert "could not be built" in out
         assert "AccessDeniedException" in out
 
     def test_prints_nothing_without_a_map(self, capsys):
-        print_org_map_summary(None, None)
+        print_org_map_summary(None, None, [])
         assert capsys.readouterr().out == ""
