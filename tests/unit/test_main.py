@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.main import (
+    MAX_ORG_MAP_CONSOLE_WARNINGS,
     exit_code,
     print_org_map_summary,
     print_summary,
@@ -1466,8 +1467,11 @@ class TestPrintOrgMapSummary:
         assert "1 direct policy attachments" in out
 
     def test_reports_policy_types_not_enabled(self, capsys):
+        """The console uses the same display labels as the CSV and the HTML."""
         print_org_map_summary(_summary_map(), None)
-        assert "RESOURCE_CONTROL_POLICY" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "Policy types not enabled: RCP" in out
+        assert "RESOURCE_CONTROL_POLICY" not in out
 
     def test_reports_policy_lookup_errors(self, capsys):
         data = _summary_map(
@@ -1502,6 +1506,32 @@ class TestPrintOrgMapSummary:
         data["root"]["childrenTruncated"] = "Walk stopped at the 5-level limit"
         print_org_map_summary(data, None)
         assert "Walk stopped" in capsys.readouterr().out
+
+    def test_caps_warning_lines_and_states_the_withheld_count(self, capsys):
+        """A throttled large organization must not bury the check results."""
+        failures = [
+            {"scope": f"TAG_POLICY: policy-{index}", "error": "TooManyRequests"}
+            for index in range(MAX_ORG_MAP_CONSOLE_WARNINGS + 7)
+        ]
+        print_org_map_summary(_summary_map(policyLookupErrors=failures), None)
+        out = capsys.readouterr().out
+
+        printed = [line for line in out.splitlines() if "may be incomplete" in line]
+        assert len(printed) == MAX_ORG_MAP_CONSOLE_WARNINGS
+        assert "and 7 more organization map warning(s)" in out
+        assert "wafa-org-map.csv" in out
+
+    def test_prints_every_warning_when_under_the_cap(self, capsys):
+        data = _summary_map(
+            policyLookupErrors=[{"scope": "TAG_POLICY", "error": "Denied"}]
+        )
+        data["root"]["accountsError"] = "AccessDeniedException"
+        print_org_map_summary(data, None)
+        out = capsys.readouterr().out
+
+        assert "TAG_POLICY" in out
+        assert "AccessDeniedException" in out
+        assert "more organization map warning" not in out
 
     def test_reports_a_map_that_could_not_be_built(self, capsys):
         print_org_map_summary(None, "AccessDeniedException")

@@ -379,6 +379,39 @@ def _verify_org_map_outputs(out_dir, org_map):
     return problems
 
 
+def _verify_html_org_map(data, raw_map):
+    """Check the HTML payload's map against wafa-raw.json (problem list).
+
+    The HTML carries map-level fields plus the finished rows. The complete tree
+    stays in wafa-raw.json, so the payload must not embed it a second time, and
+    the rows must still cover every node and account.
+    """
+    problems = []
+    if "organization_map" in data:
+        problems.append("HTML report data embeds the organization map tree as well")
+
+    summary = data.get("organization_map_summary")
+    if not raw_map:
+        if summary:
+            problems.append("HTML report data has a map but wafa-raw.json does not")
+        return problems
+    if not summary:
+        problems.append("HTML report data is missing organization_map_summary")
+        return problems
+
+    expected = {
+        "organizationId": raw_map.get("organizationId", ""),
+        "totals": raw_map.get("totals") or {},
+        "policyLookupErrors": raw_map.get("policyLookupErrors") or [],
+        "depthTruncatedPaths": raw_map.get("depthTruncatedPaths") or [],
+    }
+    if summary != expected:
+        problems.append("HTML organization_map_summary differs from wafa-raw.json")
+    if len(data.get("organization_map_rows") or []) != len(flatten_rows(raw_map)):
+        problems.append("HTML organization_map_rows do not cover the whole map")
+    return problems
+
+
 def _verify_outputs(out_dir):
     """Check the generated sample is complete, consistent, and self-contained."""
     html = _read(os.path.join(out_dir, "wafa-report.html"))
@@ -406,11 +439,11 @@ def _verify_outputs(out_dir):
             "account_info",
             "delegated_administrators",
             "delegated_administrators_error",
-            "organization_map",
             "organization_map_error",
         ):
             if key not in data or key not in raw or data[key] != raw[key]:
                 problems.append(f"HTML report data {key} differs from wafa-raw.json")
+        problems.extend(_verify_html_org_map(data, raw.get("organization_map") or {}))
         statuses = {check["status"] for check in data["checks"]}
         if not {"complete", "incomplete", "error"} <= statuses:
             problems.append("sample does not exercise complete, incomplete, and error")

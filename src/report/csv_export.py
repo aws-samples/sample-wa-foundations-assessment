@@ -111,19 +111,18 @@ def _map_level_warnings(org_map):
 
     These reach the CSV so that a reader who opens only the spreadsheet cannot
     mistake an incomplete map for a complete one (FR-12.3).
+
+    Only conditions that cannot be attributed to one row belong here. A policy
+    lookup fails per type or per policy, so it has no row of its own. A walk
+    stopped at the nesting limit does: it is reported in that OU's own Error
+    cell through its ``childrenTruncated`` note, so restating it here would
+    report the same condition twice.
     """
-    warnings = []
-    for failure in org_map.get("policyLookupErrors") or []:
-        warnings.append(
-            f"Attached policies may be incomplete for {failure.get('scope', '')}: "
-            f"{failure.get('error', '')}"
-        )
-    if org_map.get("depthTruncated"):
-        warnings.append(
-            "OU hierarchy is nested deeper than this map walks; "
-            "some OUs and accounts are not listed"
-        )
-    return warnings
+    return [
+        f"Attached policies may be incomplete for {failure.get('scope', '')}: "
+        f"{failure.get('error', '')}"
+        for failure in org_map.get("policyLookupErrors") or []
+    ]
 
 
 def generate_org_map_csv(org_map):
@@ -133,9 +132,10 @@ def generate_org_map_csv(org_map):
     attached *directly* to that row's target, never inherited ones, so an empty
     cell means "nothing attached here" rather than "nothing applies".
 
-    Map-level warnings (failed policy lookups, a truncated hierarchy) are
+    Warnings that belong to no single row, such as a failed policy lookup, are
     written into the root row's Error cell, so the spreadsheet never presents an
-    incomplete map as a complete one.
+    incomplete map as a complete one. Anything attributable to one OU, such as a
+    walk stopped at the nesting limit, is reported in that OU's own Error cell.
 
     Args:
         org_map: the map dict from ``src.checks.org_map.get_organization_map``

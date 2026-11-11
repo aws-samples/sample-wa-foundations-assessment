@@ -133,6 +133,28 @@ def _org_map_rows(org_map):
     ]
 
 
+def _org_map_summary(org_map):
+    """Return only the map-level fields the report UI reads.
+
+    The complete tree stays in ``wafa-raw.json``. Embedding it here as well
+    roughly doubles the inline JSON for data the UI never reads: it renders the
+    flattened rows plus these few summary fields.
+
+    ``depthTruncatedPaths`` replaces the ``depthTruncated`` flag for display.
+    An empty list means the walk completed, and a non-empty one names the OUs
+    where it stopped, so the summary locates the gap instead of restating a
+    condition that each affected row already carries as a note.
+    """
+    if not org_map:
+        return None
+    return {
+        "organizationId": org_map.get("organizationId", ""),
+        "totals": org_map.get("totals") or {},
+        "policyLookupErrors": org_map.get("policyLookupErrors") or [],
+        "depthTruncatedPaths": org_map.get("depthTruncatedPaths") or [],
+    }
+
+
 def _build_report_data(
     checks,
     maturity,
@@ -154,7 +176,9 @@ def _build_report_data(
         "maturity": maturity,
         "delegated_administrators": delegated_admins,
         "delegated_administrators_error": delegated_admins_error,
-        "organization_map": org_map,
+        # Map-level fields only. The full tree is in wafa-raw.json as
+        # organization_map; the UI renders organization_map_rows.
+        "organization_map_summary": _org_map_summary(org_map),
         "organization_map_error": org_map_error,
         # Flattened in Python so the UI renders structured data instead of
         # re-deriving the hierarchy and policy labels in JavaScript, which

@@ -9,6 +9,8 @@ import re
 import boto3
 from botocore.exceptions import ClientError
 
+from src.checks.org_map import list_child_ous
+
 
 def _normalize_name(name):
     """Normalize an account or OU name for matching.
@@ -316,12 +318,7 @@ def _get_top_level_ous():
     if not roots:
         return []
 
-    root_id = roots[0]["Id"]
-    ous = []
-    paginator = client.get_paginator("list_organizational_units_for_parent")
-    for page in paginator.paginate(ParentId=root_id):
-        ous.extend(page.get("OrganizationalUnits", []))
-    return ous
+    return list_child_ous(client, roots[0]["Id"])
 
 
 def check_security_ou():

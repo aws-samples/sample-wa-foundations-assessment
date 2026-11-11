@@ -240,9 +240,26 @@ class TestPartialMapIsFlagged:
         assert "INSPECTOR_POLICY" in root_error
         assert "TooManyRequestsException" in root_error
 
-    def test_depth_truncation_reaches_the_root_error_cell(self):
-        root_error = rows_for(org_map(depthTruncated=True))[1][9]
-        assert "nested deeper" in root_error
+    def test_depth_truncation_is_reported_only_on_the_truncated_node(self):
+        """A localizable warning belongs to its own row, and only there.
+
+        The truncated OU's own Error cell says where the walk stopped, so
+        repeating it on the root row would report the same condition twice.
+        """
+        root = org_map()["root"]
+        cut_off = root["children"][0]
+        cut_off["childrenTruncated"] = "Walk stopped at the limit"
+        data = org_map(
+            root=root,
+            depthTruncated=True,
+            depthTruncatedPaths=[cut_off["path"]],
+        )
+        rows = rows_for(data)
+
+        assert rows[1][9] == ""
+        truncated = [row for row in rows[1:] if row[9]]
+        assert [row[3] for row in truncated] == [cut_off["id"]]
+        assert "Walk stopped at the limit" in truncated[0][9]
 
     def test_map_warnings_do_not_displace_a_node_note(self):
         root = org_map()["root"]

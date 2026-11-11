@@ -366,9 +366,21 @@ Based on the AWS Well-Architected Foundations maturity model (March 2026). Maps 
 so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. The OU and policy-type
 *checks* in FR-3.6–FR-3.12 remain the scored view of the same services.
 - FR-12.1: Walk the OU hierarchy from `organizations.listRoots()`, using
-  `organizations.listOrganizationalUnitsForParent()` (paginate fully) recursively. Bound the recursion at
-  5 levels below the root, which is the AWS Organizations nesting limit, and flag `depthTruncated` when
-  the limit is reached rather than implying the map is complete.
+  `organizations.listOrganizationalUnitsForParent()` (paginate fully). Bound the walk at
+  5 levels below the root, which is the AWS Organizations nesting limit.
+  - Walk one level at a time, submitting both calls for every node on that level to the same bounded
+    `ThreadPoolExecutor` used by FR-12.3 before reading any result, and consume the results in level order
+    so the tree, the totals, and the per-node warnings stay deterministic. The call count is unchanged at
+    two per OU; only the latency improves, and the pool stays small because Organizations throttles hard.
+  - Record `childrenTruncated` on the node where the walk stopped, naming how many child OUs were not
+    listed, so the gap is locatable. Flag truncation only when children actually exist past the limit: an
+    OU sitting exactly at the limit with no children is not truncation.
+  - Summarize the same condition at map level as `depthTruncated` with `depthTruncatedPaths` naming those
+    nodes. The summary locates the gap; the explanation stays on the node. No output restates a node's
+    warning at map level (see FR-12.4 and FR-12.5).
+  - Build each node's `path` by joining names with `/`, escaping `\` and then `/` inside a name. AWS
+    permits `/` in an OU name, so an OU literally named `Prod/EU` would otherwise produce the same path as
+    an OU `EU` nested inside an OU `Prod`. Escaping the backslash first keeps the escaping reversible.
 - FR-12.2: For each root and OU, call `organizations.listAccountsForParent()` (paginate fully) to record
   account placement. Include suspended accounts with their `status`; do not drop them. Record the account
   `id`, `name`, and `status` only — never the account email address, which is personal data not needed to
@@ -379,13 +391,19 @@ so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. 
   root, OU, or account, recording policy `id`, `name`, `type`, and `awsManaged`.
   - Both this and the per-target alternative report only **directly attached** policies, never inherited
     ones. An empty list means nothing is attached at that level, not that no policy applies.
-  - The cost is `enabled policy types + policies`, which grows with the number of policies. Interrogating
-    each target instead costs `targets x enabled policy types`, which grows with the size of the
-    organization and throttles on large ones. Account-level attachments arrive in the same responses, so
-    they are always included and need no opt-in flag.
-  - Only types enabled on the root are queried, so `PolicyTypeNotEnabledException` is avoided rather than
-    handled. `PolicyTypeNotEnabledException` and `UnsupportedAPIEndpointException` are still treated as a
-    confirmed absence (the type is not in use, or not offered in this partition).
+  - Treat `enabled policy types + policies` as a **floor on the attachment lookups, not a total**.
+    `listTargetsForPolicy` pages, so a policy attached to every target, as `FullAWSAccess` usually is,
+    pages across all of them and its own lookup still scales with the organization. The FR-12.1 walk is
+    also unchanged at two calls per OU, so on a large organization most of the calls are the walk rather
+    than the policy lookups. What the inversion buys is that the attachment lookups stop growing with the
+    number of OUs: interrogating each target instead costs `targets x enabled policy types`, which grows
+    with the size of the organization and throttles on large ones. Account-level attachments arrive in the
+    same responses, so they are always included and need no opt-in flag.
+  - Only types enabled on the root are queried, so `PolicyTypeNotEnabledException` is expected not to
+    occur. If `listPolicies` raises it or `UnsupportedAPIEndpointException` anyway, that is a disagreement
+    between two AWS answers, not a confirmed absence: record it in `policyLookupErrors` naming the
+    contradiction. Skipping it would show the type as enabled with no attachment anywhere, which is
+    indistinguishable from "enabled but genuinely unused".
   - Use a bounded `ThreadPoolExecutor`, creating the client in the calling thread (see NFR-2.2), and await
     every lookup so one failure cannot hide another policy's attachments.
   - Configure the Organizations client with **adaptive** retries. Organizations enforces a low request rate
@@ -398,20 +416,36 @@ so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. 
     plainly when a guardrail type is not in use at all.
 - FR-12.4: Generate `wafa-org-map.csv` with one row per root, OU, and account, separating directly attached
   SCPs, RCPs, and other policy types into their own columns. Keep it separate from `wafa-checks.csv`, which
-  stays one row per check.
+  stays one row per check. Escape cells that begin with `=`, `+`, `-`, `@`, tab, or CR so AWS-provided
+  names and error messages cannot execute as spreadsheet formulas.
+  - Warnings that belong to no single row, that is `policyLookupErrors`, go in the root row's Error cell so
+    a reader who opens only the spreadsheet cannot mistake an incomplete map for a complete one, without
+    displacing that row's own note. A warning attributable to one node — `accountsError`, `childrenError`,
+    `childrenTruncated` — appears only in that node's Error cell.
 - FR-12.5: Display as a separate "Organization Map" section in the HTML report, below the check results,
   with an indented structure table, account placement, status, and attached-policy badges. Print a one-line
   console summary of OU, account, and attachment counts.
-  - Also included in `wafa-raw.json` as `organization_map`, plus `organization_map_error` when the map could
-    not be built. The HTML report data uses the same keys.
+  - Page and filter the structure table, and show each row's OU path, because paging or filtering separates
+    a row from the ancestors its indentation refers to. Do not sort it: the row order is the hierarchy.
+  - Render display labels, not API constants, for policy types in every output including the console.
+  - `wafa-raw.json` carries the complete map as `organization_map`, plus `organization_map_error` when it
+    could not be built. The HTML report data carries `organization_map_rows` (rows flattened in Python with
+    finished policy labels and a stable row key) and `organization_map_summary`, which holds only the
+    map-level fields the UI reads: `organizationId`, `totals`, `policyLookupErrors`, and
+    `depthTruncatedPaths`. The HTML must not embed the tree as well, which would roughly double the inline
+    JSON for data the UI never reads.
   - A per-node failure is recorded on that node as `accountsError` or `childrenError` and keeps the rest of
     the map, mirroring FR-9's partial-result behavior. Policy lookup failures are organization-wide rather
     than per-node and are reported through `policyLookupErrors`.
+  - The console prints every map-level and per-node warning, each naming its node, but caps the warning
+    lines and states how many were withheld. A throttled large organization can produce a warning per node,
+    which would otherwise push the check results off-screen; the HTML report and the CSV carry them all.
   - NOT scored — informational reference only.
 - Output: `{organizationId, managementAccountId, root, enabledPolicyTypes, policyTypesNotEnabled,
-  policyLookupErrors, totals: {organizationalUnits, accounts, maxDepth}, depthTruncated?}`, where each node
-  is `{id, name, type, path, depth, policies: [...], accounts: [...], children: [...]}` and each account is
-  `{id, name, status, policies: [...]}`.
+  policyLookupErrors, totals: {organizationalUnits, accounts, maxDepth}, depthTruncated?,
+  depthTruncatedPaths?}`, where each node is `{id, name, type, path, depth, policies: [...],
+  accounts: [...], children: [...]}` plus `accountsError?`, `childrenError?`, and `childrenTruncated?`, and
+  each account is `{id, name, status, policies: [...]}`.
 
 ## Non-Functional Requirements
 

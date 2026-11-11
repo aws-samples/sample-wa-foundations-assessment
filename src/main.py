@@ -25,6 +25,11 @@ from src.discovery.account_type import detect_account_type, detect_partition
 from src.discovery.regions import discover_regions
 from src.report.csv_export import generate_csv, generate_org_map_csv
 from src.report.html_report import generate_html
+from src.report.policy_labels import policy_type_label
+
+# Upper bound on organization map warning lines printed to the console, so a
+# large or throttled organization cannot bury the assessment results.
+MAX_ORG_MAP_CONSOLE_WARNINGS = 10
 
 
 def parse_args():
@@ -82,9 +87,11 @@ def print_summary(checks, maturity):
 def print_org_map_summary(org_map, org_map_error):
     """Print a console summary of the organization map (FR-12.5).
 
-    Every reason the map could be incomplete is printed, not just the totals.
-    The counts alone would otherwise read as a complete, smaller organization
-    when an OU's accounts or children could not be listed.
+    Reasons the map could be incomplete are printed, not just the totals: the
+    counts alone would otherwise read as a complete, smaller organization when
+    an OU's accounts or children could not be listed. The warning lines are
+    capped at ``MAX_ORG_MAP_CONSOLE_WARNINGS`` and the withheld count is
+    stated, because every warning is also in the HTML report and the CSV.
     """
     if org_map_error:
         print(f"  Organization map: could not be built — {org_map_error}")
@@ -101,18 +108,33 @@ def print_org_map_summary(org_map, org_map_error):
     )
     not_enabled = org_map.get("policyTypesNotEnabled") or []
     if not_enabled:
-        print(f"    Policy types not enabled: {', '.join(not_enabled)}")
-    for failure in org_map.get("policyLookupErrors") or []:
-        print(
-            f"    Attachments may be incomplete for {failure['scope']}: "
-            f"{failure['error']}"
-        )
+        labels = ", ".join(policy_type_label(p) for p in not_enabled)
+        print(f"    Policy types not enabled: {labels}")
+
+    warnings = [
+        f"Attachments may be incomplete for {failure['scope']}: {failure['error']}"
+        for failure in org_map.get("policyLookupErrors") or []
+    ]
     # Per-node warnings: a denied ListAccountsForParent, an unreadable child
     # OU, or a walk stopped at the nesting limit. Each names the node it
     # applies to, so the gap is locatable rather than just flagged.
-    for row in rows:
-        if row.get("note"):
-            print(f"    {row.get('path') or row.get('name')}: {row['note']}")
+    warnings.extend(
+        f"{row.get('path') or row.get('name')}: {row['note']}"
+        for row in rows
+        if row.get("note")
+    )
+    # A throttled large organization can produce a warning per node, which
+    # would push the check results off-screen. The count is always stated, and
+    # every warning is in the HTML report and the CSV in full.
+    for warning in warnings[:MAX_ORG_MAP_CONSOLE_WARNINGS]:
+        print(f"    {warning}")
+    withheld = len(warnings) - MAX_ORG_MAP_CONSOLE_WARNINGS
+    if withheld > 0:
+        print(
+            f"    ... and {withheld} more organization map warning(s); "
+            "see the Organization Map section of the HTML report "
+            "or wafa-org-map.csv for all of them"
+        )
 
 
 def upload_to_s3(output_path, account_id, files):

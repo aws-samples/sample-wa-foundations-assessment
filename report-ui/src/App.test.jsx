@@ -23,75 +23,22 @@ function orgStructureRows(section) {
   return [...section.querySelectorAll("div[style]")]
     .filter((element) => /^\d+px$/.test(element.style.marginLeft))
     .map((element) => ({
-      label: element.textContent.trim(),
+      // The name is the first inline element in the cell; the OU path and any
+      // warning follow it, so read the name rather than the whole cell.
+      label: element.querySelector("strong, span").textContent.trim(),
       indent: element.style.marginLeft,
     }));
 }
 
-function orgMap(overrides = {}) {
+// Mirrors the organization_map_summary payload built by _org_map_summary() in
+// src/report/html_report.py: map-level fields only. The full tree stays in
+// wafa-raw.json, so the HTML never embeds it twice.
+function orgMapSummary(overrides = {}) {
   return {
     organizationId: "o-example12345",
-    managementAccountId: "111111111111",
-    enabledPolicyTypes: ["SERVICE_CONTROL_POLICY"],
-    policyTypesNotEnabled: ["RESOURCE_CONTROL_POLICY"],
-    policyLookupErrors: [],
     totals: { organizationalUnits: 1, accounts: 2, maxDepth: 1 },
-    root: {
-      id: "r-root",
-      name: "Root",
-      type: "ROOT",
-      path: "Root",
-      depth: 0,
-      policies: [
-        {
-          id: "p-full",
-          name: "FullAWSAccess",
-          type: "SERVICE_CONTROL_POLICY",
-          awsManaged: true,
-        },
-      ],
-      accounts: [
-        {
-          id: "111111111111",
-          name: "Management",
-          status: "ACTIVE",
-          policies: [],
-        },
-      ],
-      children: [
-        {
-          id: "ou-sec",
-          name: "Security",
-          type: "ORGANIZATIONAL_UNIT",
-          path: "Root/Security",
-          depth: 1,
-          policies: [
-            {
-              id: "p-deny",
-              name: "DenyRootUser",
-              type: "SERVICE_CONTROL_POLICY",
-              awsManaged: false,
-            },
-          ],
-          accounts: [
-            {
-              id: "333333333333",
-              name: "Audit",
-              status: "SUSPENDED",
-              policies: [
-                {
-                  id: "p-acct",
-                  name: "AccountGuardrail",
-                  type: "SERVICE_CONTROL_POLICY",
-                  awsManaged: false,
-                },
-              ],
-            },
-          ],
-          children: [],
-        },
-      ],
-    },
+    policyLookupErrors: [],
+    depthTruncatedPaths: [],
     ...overrides,
   };
 }
@@ -239,7 +186,7 @@ function reportData(overrides = {}) {
       { accountId: "222222222222", accountName: "Security", services: ["guardduty.amazonaws.com"] },
     ],
     delegated_administrators_error: null,
-    organization_map: orgMap(),
+    organization_map_summary: orgMapSummary(),
     organization_map_rows: orgMapRows(),
     organization_map_not_enabled_labels: ["RCP"],
     organization_map_error: null,
@@ -470,6 +417,38 @@ describe("report UI", () => {
     ]);
   });
 
+  it("pages the organization map instead of rendering every row", () => {
+    // A large organization would otherwise render thousands of rows, each with
+    // policy badges, on first load.
+    const rows = Array.from({ length: 120 }, (_, index) => ({
+      key: `account:${index}`,
+      kind: "account",
+      name: `Account ${index}`,
+      id: `${index}`,
+      depth: 1,
+      path: "Root",
+      status: "ACTIVE",
+      note: "",
+      policies: [],
+    }));
+    const { container } = renderReport({ organization_map_rows: rows });
+    const section = container.querySelector("#org-map");
+    expect(orgStructureRows(section)).toHaveLength(50);
+    expect(section.textContent).not.toContain("Account 119");
+  });
+
+  it("filters the organization map and keeps each row locatable", () => {
+    const { container } = renderReport();
+    const section = container.querySelector("#org-map");
+    fireEvent.change(section.querySelector("input"), {
+      target: { value: "Audit" },
+    });
+    expect(orgStructureRows(section).map((row) => row.label)).toEqual(["Audit"]);
+    // Paging and filtering both separate a row from its ancestors, so every
+    // row shows the OU path that places it.
+    expect(section.textContent).toContain("Root/Security");
+  });
+
   it("notes guardrail policy types that are not enabled", () => {
     const { container } = renderReport();
     expect(container.querySelector("#org-map").textContent).toContain(
@@ -486,7 +465,7 @@ describe("report UI", () => {
 
   it("warns when policy attachments could not be fully listed", () => {
     const { container } = renderReport({
-      organization_map: orgMap({
+      organization_map_summary: orgMapSummary({
         policyLookupErrors: [
           { scope: "INSPECTOR_POLICY", error: "TooManyRequestsException" },
         ],
@@ -498,13 +477,17 @@ describe("report UI", () => {
     expect(section).toContain("TooManyRequestsException");
   });
 
-  it("warns when the OU hierarchy was not fully walked", () => {
+  it("names the OUs where the hierarchy walk stopped", () => {
+    // The map-level warning locates the gap; the affected row carries the
+    // explanation, so neither surface restates the other.
     const { container } = renderReport({
-      organization_map: orgMap({ depthTruncated: true }),
+      organization_map_summary: orgMapSummary({
+        depthTruncatedPaths: ["Root/Security/A/B/C/Deepest"],
+      }),
     });
-    expect(container.querySelector("#org-map").textContent).toContain(
-      "nested deeper than the levels this map walks",
-    );
+    const section = container.querySelector("#org-map").textContent;
+    expect(section).toContain("nested deeper than the levels this map walks");
+    expect(section).toContain("Root/Security/A/B/C/Deepest");
   });
 
   it("surfaces per-node organization map warnings", () => {
@@ -518,7 +501,7 @@ describe("report UI", () => {
 
   it("shows the organization map section when the map could not be built", () => {
     const { container } = renderReport({
-      organization_map: null,
+      organization_map_summary: null,
       organization_map_error: "AccessDeniedException",
     });
     const section = container.querySelector("#org-map");
@@ -529,7 +512,7 @@ describe("report UI", () => {
 
   it("omits the organization map section in limited mode", () => {
     const { container, wrapper } = renderReport({
-      organization_map: null,
+      organization_map_summary: null,
       organization_map_rows: [],
       organization_map_error: null,
     });

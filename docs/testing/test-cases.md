@@ -352,6 +352,13 @@ For each, set up the "good" and "bad" state and confirm status flips correctly.
   commonly misread part of the output.
 - Member/standalone account. **Expected:** no Organization Map section, and no
   `wafa-org-map.csv` — absent, not an errored section.
+- **Deeply nested hierarchy (6+ levels):** the OU where the walk stopped shows the warning
+  on its own row, naming how many child OUs are not listed, and the section header warning
+  names that OU's path. The same condition must not be stated twice on one surface.
+- **Large hierarchy in the report:** the structure table pages rather than rendering every
+  row, each row shows its OU path so a row on page 2 is still locatable, and the filter
+  finds an account by name or ID. The table must not be sortable — the row order is the
+  hierarchy.
 
 ### E13. Policy type coverage in the map (FR-12.3)
 - With RCPs not enabled, confirm the section states that RCP is not enabled rather
@@ -362,12 +369,23 @@ For each, set up the "good" and "bad" state and confirm status flips correctly.
   with no flag or extra option needed.
 - Large organization (hundreds of OUs): **expected:** completes without throttling, and
   `policyLookupErrors` in `wafa-raw.json` is empty. Record timings and the call count.
-  Attachment lookups should scale with the number of policies, not the number of OUs, so
-  a big organization with few policies should be no slower than a small one.
+  Attachment lookups should not grow with the number of OUs, only with the number of
+  policies. The OU walk still costs two calls per OU, so it is the dominant call count on
+  a large organization; it runs a level at a time through the bounded pool, so compare the
+  wall-clock time against that call count rather than expecting it to be flat.
 - Throttle deliberately (many policies, or run concurrently with other Organizations
   callers). **Expected:** the report warns "Attached policies may be incomplete" and names
   the affected policy type or policy; it never shows an empty policy list as if nothing
   were attached.
+- **Two AWS answers disagreeing:** if `ListPolicies` returns `PolicyTypeNotEnabledException`
+  or `UnsupportedAPIEndpointException` for a type the root reports as `ENABLED`, expect that
+  type in `policyLookupErrors` saying so. It must not be reported as an absence: the map
+  would then show the type as enabled with no attachment anywhere, which looks exactly like
+  a type that is enabled but unused. (Hard to force deliberately; check the handling in
+  `src/checks/org_map.py` and its unit test.)
+- **Console warning volume:** with many node or policy warnings, confirm the console prints
+  at most ten and states how many were withheld, and that the check results table is still
+  visible above the prompt. Every warning must still be in the HTML report and the CSV.
 
 ---
 
@@ -449,9 +467,12 @@ Owner: ____
 - **Formula injection:** if any OU or account name begins with `=`, `+`, `-` or `@`,
   confirm the cell is prefixed with an apostrophe and the spreadsheet shows it as
   literal text rather than evaluating it.
-- **Partial maps are flagged:** when a policy lookup was denied or throttled, or the
-  hierarchy was deeper than the walk goes, the root row's Error cell says so. An
-  incomplete map must never look complete in the spreadsheet.
+- **Partial maps are flagged:** when a policy lookup was denied or throttled, the root
+  row's Error cell says so, because that failure belongs to a policy type rather than to
+  any one row. A warning that does belong to one row — a denied account listing, an
+  unreadable child OU, or a walk stopped at the nesting limit — appears in that row's own
+  Error cell and nowhere else. An incomplete map must never look complete in the
+  spreadsheet, and no condition should be reported twice.
 
 ---
 

@@ -9,6 +9,7 @@ import pytest
 
 from scripts.generate_sample_report import _verify_outputs
 from src.checks.maturity import calculate_maturity_level
+from src.checks.org_map import flatten_rows
 from src.report.csv_export import generate_csv, generate_org_map_csv
 from src.report.html_report import (
     ASSETS_DIR,
@@ -278,6 +279,36 @@ class TestGenerateHtml:
 
         assert data["delegated_administrators"] == admins
         assert data["account_info"] == account_info
+
+    def test_report_data_carries_the_map_summary_not_the_tree(self):
+        """The UI reads rows plus map-level fields, so the tree is not embedded.
+
+        Embedding both roughly doubles the inline JSON. The complete tree stays
+        in ``wafa-raw.json``.
+        """
+        org_map = _make_org_map()
+        org_map["depthTruncated"] = True
+        org_map["depthTruncatedPaths"] = ["Root/Workloads/Production"]
+        data = _report_data(
+            generate_html(_make_checks(), _make_maturity(), org_map=org_map)
+        )
+
+        assert "organization_map" not in data
+        assert data["organization_map_summary"] == {
+            "organizationId": "o-example12345",
+            "totals": org_map["totals"],
+            "policyLookupErrors": [],
+            "depthTruncatedPaths": ["Root/Workloads/Production"],
+        }
+        # Nothing the UI renders is lost: the rows still cover every node.
+        rows = data["organization_map_rows"]
+        assert len(rows) == len(flatten_rows(org_map))
+        assert rows[0]["key"] == "root:r-root"
+
+    def test_report_data_has_no_map_summary_without_a_map(self):
+        data = _report_data(generate_html(_make_checks(), _make_maturity()))
+        assert data["organization_map_summary"] is None
+        assert data["organization_map_rows"] == []
 
     def test_html_escapes_untrusted_check_content(self):
         """Dynamic check content cannot break out of the JSON data element."""

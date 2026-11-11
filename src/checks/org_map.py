@@ -29,9 +29,12 @@ The second term matters: a policy attached to every target, as
 scales with the size of the organization even though the others do not. Treat
 ``types + policies`` as a floor, not the total.
 
-The OU walk itself is unchanged and still costs two calls per OU
+The OU walk itself still costs two calls per OU
 (``ListOrganizationalUnitsForParent`` and ``ListAccountsForParent``), so on a
-large organization most of the runtime is the walk, not the policy lookups.
+large organization most of the calls are the walk, not the policy lookups. The
+walk runs one level of the hierarchy at a time and issues both calls for every
+OU on that level through the same bounded pool, so its *latency* is a few
+rounds rather than two calls per OU in series. The call count is unchanged.
 
 Account-level attachments come back in the same responses as the OU ones, so
 they need no extra calls and are always included.
@@ -55,17 +58,20 @@ MAX_OU_DEPTH = 5
 # reads backs off instead of exhausting its attempts and losing data.
 _CLIENT_CONFIG = Config(retries={"max_attempts": 10, "mode": "adaptive"})
 
-# Bounded fan-out for the policy lookups.
+# Bounded fan-out for the OU walk and the policy lookups.
 _MAX_WORKERS = 4
 
 # Always reported, so the map states plainly whether the two guardrail policy
 # types are in use rather than staying silent when they are not enabled.
 ALWAYS_REPORTED_POLICY_TYPES = ("SERVICE_CONTROL_POLICY", "RESOURCE_CONTROL_POLICY")
 
-# A policy type that is absent here is an observed absence, not a failure to
-# determine state: the type is either not enabled in this organization or not
-# offered in this partition (for example aws-us-gov or aws-cn).
-_POLICY_TYPE_UNAVAILABLE_CODES = frozenset(
+# A policy type the root reports as ENABLED but that ``ListPolicies`` then
+# rejects as not enabled or not supported. Only the types enabled on the root
+# are queried, so these codes are a disagreement between two AWS answers, not
+# a confirmed absence: reporting them as an absence would show the type as
+# enabled with no attachment anywhere, which is indistinguishable from
+# "enabled but genuinely unused".
+_POLICY_TYPE_CONTRADICTION_CODES = frozenset(
     {
         "PolicyTypeNotEnabledException",
         "UnsupportedAPIEndpointException",
@@ -107,8 +113,12 @@ def _list_child_accounts(client, parent_id):
     return accounts
 
 
-def _list_child_ous(client, parent_id):
-    """List OUs directly under a root or OU, fully paginated."""
+def list_child_ous(client, parent_id):
+    """List OUs directly under a root or OU, fully paginated.
+
+    Takes an existing client so the caller owns client creation; shared with
+    ``src.checks.organization`` rather than duplicating the pagination loop.
+    """
     ous = []
     paginator = client.get_paginator("list_organizational_units_for_parent")
     for page in paginator.paginate(ParentId=parent_id):
@@ -116,13 +126,10 @@ def _list_child_ous(client, parent_id):
     return ous
 
 
-def _build_node(client, node_id, name, node_type, path, depth, stats):
-    """Build one tree node and recurse into its child OUs.
-
-    Failures are recorded on the node and never raised, so one unreadable OU
-    cannot collapse the whole map.
-    """
-    node = {
+def _new_node(node_id, name, node_type, path, depth, stats):
+    """Create an empty tree node and record its depth."""
+    stats["max_depth"] = max(stats["max_depth"], depth)
+    return {
         "id": node_id,
         "name": name,
         "type": node_type,
@@ -132,52 +139,88 @@ def _build_node(client, node_id, name, node_type, path, depth, stats):
         "accounts": [],
         "children": [],
     }
-    stats["max_depth"] = max(stats["max_depth"], depth)
 
-    try:
-        accounts = [_account_entry(a) for a in _list_child_accounts(client, node_id)]
-        accounts.sort(key=lambda a: (a["name"].lower(), a["id"]))
-        node["accounts"] = accounts
-        stats["accounts"] += len(accounts)
-    except Exception as e:
-        node["accountsError"] = str(e)
 
-    try:
-        child_ous = _list_child_ous(client, node_id)
-    except Exception as e:
-        node["childrenError"] = str(e)
-        return node
+def _build_tree(client, root_id, root_name, stats):
+    """Walk the hierarchy from the root, one level at a time.
 
-    if child_ous and depth >= MAX_OU_DEPTH:
-        # Children exist beyond the documented nesting limit, so this walk
-        # stopped short: say so instead of implying the map is complete. An OU
-        # sitting exactly at the limit has no children, which is not truncation.
-        # The note is recorded on the node that was cut off, so the CSV and the
-        # console name the exact place the map stops rather than only flagging
-        # it once for the whole organization.
-        stats["depth_truncated"] = True
-        node["childrenTruncated"] = (
-            f"Walk stopped at the {MAX_OU_DEPTH}-level nesting limit; "
-            f"{len(child_ous)} child OU(s) and anything below them "
-            "are not listed"
-        )
-        return node
+    Both calls for every node on a level are submitted to the same bounded
+    pool before any result is read, so the walk's latency is a few rounds per
+    level instead of two calls per OU in series. The call count is unchanged,
+    and the pool stays small because Organizations enforces a low request
+    rate.
 
-    for ou in sorted(child_ous, key=lambda o: (o.get("Name") or "").lower()):
-        ou_name = ou.get("Name", "")
-        stats["organizational_units"] += 1
-        node["children"].append(
-            _build_node(
-                client,
-                ou.get("Id", ""),
-                ou_name,
-                "ORGANIZATIONAL_UNIT",
-                f"{path}/{_path_segment(ou_name)}",
-                depth + 1,
-                stats,
-            )
-        )
-    return node
+    Results are consumed in level order, so the tree, the totals, and the
+    per-node warnings are identical to a serial walk.
+
+    Failures are recorded on the node and never raised, so one unreadable OU
+    cannot collapse the whole map.
+    """
+    root = _new_node(root_id, root_name, "ROOT", _path_segment(root_name), 0, stats)
+    level = [root]
+
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+        while level:
+            pending = [
+                (
+                    node,
+                    executor.submit(_list_child_accounts, client, node["id"]),
+                    executor.submit(list_child_ous, client, node["id"]),
+                )
+                for node in level
+            ]
+
+            next_level = []
+            for node, accounts_future, ous_future in pending:
+                try:
+                    accounts = [_account_entry(a) for a in accounts_future.result()]
+                except Exception as e:
+                    node["accountsError"] = str(e)
+                else:
+                    accounts.sort(key=lambda a: (a["name"].lower(), a["id"]))
+                    node["accounts"] = accounts
+                    stats["accounts"] += len(accounts)
+
+                try:
+                    child_ous = ous_future.result()
+                except Exception as e:
+                    node["childrenError"] = str(e)
+                    continue
+
+                if child_ous and node["depth"] >= MAX_OU_DEPTH:
+                    # Children exist beyond the documented nesting limit, so
+                    # this walk stopped short: say so instead of implying the
+                    # map is complete. An OU sitting exactly at the limit has
+                    # no children, which is not truncation. The note is
+                    # recorded on the node that was cut off, so every output
+                    # names the exact place the map stops.
+                    stats["truncated_paths"].append(node["path"])
+                    node["childrenTruncated"] = (
+                        f"Walk stopped at the {MAX_OU_DEPTH}-level nesting limit; "
+                        f"{len(child_ous)} child OU(s) and anything below them "
+                        "are not listed"
+                    )
+                    continue
+
+                for ou in sorted(
+                    child_ous, key=lambda o: (o.get("Name") or "").lower()
+                ):
+                    ou_name = ou.get("Name", "")
+                    stats["organizational_units"] += 1
+                    child = _new_node(
+                        ou.get("Id", ""),
+                        ou_name,
+                        "ORGANIZATIONAL_UNIT",
+                        f"{node['path']}/{_path_segment(ou_name)}",
+                        node["depth"] + 1,
+                        stats,
+                    )
+                    node["children"].append(child)
+                    next_level.append(child)
+
+            level = next_level
+
+    return root
 
 
 def _iter_nodes(node):
@@ -304,8 +347,17 @@ def _attach_policies(client, root, policy_types):
             except ClientError as e:
                 if (
                     e.response.get("Error", {}).get("Code")
-                    in _POLICY_TYPE_UNAVAILABLE_CODES
+                    in _POLICY_TYPE_CONTRADICTION_CODES
                 ):
+                    errors.append(
+                        {
+                            "scope": policy_type,
+                            "error": (
+                                "The organization root reports this policy type as "
+                                f"ENABLED, but listing its policies failed: {e}"
+                            ),
+                        }
+                    )
                     continue
                 errors.append({"scope": policy_type, "error": str(e)})
             except Exception as e:
@@ -364,7 +416,7 @@ def get_organization_map():
         "organizational_units": 0,
         "accounts": 0,
         "max_depth": 0,
-        "depth_truncated": False,
+        "truncated_paths": [],
     }
     try:
         client = boto3.client("organizations", config=_CLIENT_CONFIG)
@@ -381,15 +433,7 @@ def get_organization_map():
         )
 
         root_name = root.get("Name") or "Root"
-        root_node = _build_node(
-            client,
-            root.get("Id", ""),
-            root_name,
-            "ROOT",
-            _path_segment(root_name),
-            0,
-            stats,
-        )
+        root_node = _build_tree(client, root.get("Id", ""), root_name, stats)
 
         policy_errors = _attach_policies(client, root_node, enabled_policy_types)
 
@@ -410,8 +454,12 @@ def get_organization_map():
                 "maxDepth": stats["max_depth"],
             },
         }
-        if stats["depth_truncated"]:
+        if stats["truncated_paths"]:
+            # The flag summarizes; the paths locate. Each truncated node also
+            # carries its own ``childrenTruncated`` note, so no output has to
+            # restate the condition at map level to say where it happened.
             data["depthTruncated"] = True
+            data["depthTruncatedPaths"] = sorted(stats["truncated_paths"])
         return data, None
 
     except ClientError as e:

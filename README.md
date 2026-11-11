@@ -4,7 +4,7 @@
 
 ![License: MIT-0](https://img.shields.io/badge/License-MIT--0-yellow.svg)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
-![Tests](https://img.shields.io/badge/tests-296%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-302%20passing-brightgreen.svg)
 
 WAFA is an open-source AWS foundations assessment tool. Its assessment checks
 use read, list, and describe APIs to evaluate organization-level configuration
@@ -133,8 +133,10 @@ than the policy lookups.
 
 Suspended accounts are listed with their status rather than omitted, so the map
 matches what the Organizations console shows. If a policy lookup is throttled
-or denied, the report says attachments may be incomplete instead of showing an
-empty list.
+or denied, or a policy type the root reports as enabled turns out not to be
+listable, the report says attachments may be incomplete instead of showing an
+empty list. Where the OU walk stops short of the nesting limit, the OU it
+stopped at says so.
 
 ### Check result statuses
 
@@ -519,14 +521,14 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 
-# Run tests (296 tests)
+# Run tests (302 tests)
 python -m pytest tests/unit/ -v
 
 # Run with coverage
 python -m pytest tests/unit/ --cov=src --cov-report=term-missing
 ```
 
-The current suite contains 296 tests and reports 97% statement coverage.
+The current suite contains 302 tests and reports 97% statement coverage.
 
 ### Report UI
 
@@ -608,7 +610,7 @@ sample-wa-foundations-assessment/
 ├── report-ui/                   # Cloudscape React source for the HTML report
 ├── scripts/                     # Sample report generator
 ├── sample-reports/              # Generated sample report, checks, and org map
-├── tests/unit/                  # 296 pytest tests, 97% coverage
+├── tests/unit/                  # 302 pytest tests, 97% coverage
 ├── deployment/
 │   └── wafa-stack.yaml          # CloudFormation template
 ├── deploy.sh                    # Deployment script

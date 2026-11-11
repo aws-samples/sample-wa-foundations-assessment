@@ -284,6 +284,9 @@ class TestOrganizationMapStructure:
         )
         assert "nesting limit" in deepest["note"]
         assert "not listed" in deepest["note"]
+        # The map-level field names those nodes, so a summary can locate the
+        # gap without restating the warning each node already carries.
+        assert data["depthTruncatedPaths"] == [deepest["path"]]
 
     def test_hierarchy_exactly_at_the_depth_guard_is_not_truncated(self):
         """An OU at the nesting limit has no children, so nothing was missed."""
@@ -299,6 +302,68 @@ class TestOrganizationMapStructure:
     def test_no_truncation_flag_within_the_depth_guard(self):
         data, _ = run_map(sample_org())
         assert "depthTruncated" not in data
+        assert "depthTruncatedPaths" not in data
+
+
+class TestConcurrentWalk:
+    """The walk runs a level at a time through a bounded pool.
+
+    Concurrency must not change the tree: the results are consumed in level
+    order, so ordering, totals, and depth stay deterministic.
+    """
+
+    def test_wide_level_keeps_sorted_order_and_exact_totals(self):
+        names = ["Zeta", "alpha", "Mu", "beta", "Omega"] * 6
+        ous = {
+            "r-root": [
+                {"Id": f"ou-{index:02d}", "Name": f"{name}-{index:02d}"}
+                for index, name in enumerate(names)
+            ]
+        }
+        accounts = {
+            f"ou-{index:02d}": [{"Id": f"{index:012d}", "Name": f"Account-{index:02d}"}]
+            for index in range(len(names))
+        }
+        data, error = run_map(
+            FakeOrganizations(ous=ous, accounts=accounts, policy_types=())
+        )
+
+        assert error is None
+        assert data["totals"] == {
+            "organizationalUnits": len(names),
+            "accounts": len(names),
+            "maxDepth": 1,
+        }
+        expected = sorted(
+            (ou["Name"] for ou in ous["r-root"]), key=lambda name: name.lower()
+        )
+        assert [child["name"] for child in data["root"]["children"]] == expected
+
+    def test_a_failed_node_does_not_stop_the_rest_of_its_level(self):
+        ous = {
+            "r-root": [
+                {"Id": "ou-a", "Name": "A"},
+                {"Id": "ou-b", "Name": "B"},
+                {"Id": "ou-c", "Name": "C"},
+            ],
+            "ou-b": [{"Id": "ou-b1", "Name": "B1"}],
+            "ou-c": [{"Id": "ou-c1", "Name": "C1"}],
+        }
+        fake = FakeOrganizations(
+            ous=ous,
+            account_errors={"ou-a": client_error("AccessDeniedException")},
+            ou_errors={"ou-b": client_error("ThrottlingException")},
+            policy_types=(),
+        )
+        data, error = run_map(fake)
+
+        assert error is None
+        root = data["root"]
+        assert "AccessDeniedException" in find_node(root, "ou-a")["accountsError"]
+        assert "ThrottlingException" in find_node(root, "ou-b")["childrenError"]
+        # The sibling after both failures was still walked into.
+        assert find_node(root, "ou-c1") is not None
+        assert data["totals"]["organizationalUnits"] == 4
 
 
 class TestPagination:
@@ -473,15 +538,29 @@ class TestPolicyLookupFailures:
     @pytest.mark.parametrize(
         "code", ["PolicyTypeNotEnabledException", "UnsupportedAPIEndpointException"]
     )
-    def test_unavailable_policy_type_is_absence_not_error(self, code):
-        """A type absent from this org or partition is a confirmed absence."""
+    def test_unavailable_policy_type_contradiction_is_reported(self, code):
+        """Only types the root reports as ENABLED are queried.
+
+        So this code is a disagreement between two AWS answers, not a
+        confirmed absence. Skipping it silently would show the type as enabled
+        with no attachment anywhere, which is indistinguishable from "enabled
+        but genuinely unused".
+        """
         fake = sample_org(
             list_policies_errors={"SERVICE_CONTROL_POLICY": client_error(code)}
         )
         data, error = run_map(fake)
 
         assert error is None
-        assert data["policyLookupErrors"] == []
+        assert [e["scope"] for e in data["policyLookupErrors"]] == [
+            "SERVICE_CONTROL_POLICY"
+        ]
+        reported = data["policyLookupErrors"][0]["error"]
+        assert "reports this policy type as ENABLED" in reported
+        assert code in reported
+        # The type is still listed as enabled, so the two must not disagree
+        # silently.
+        assert "SERVICE_CONTROL_POLICY" in data["enabledPolicyTypes"]
         # The other type still resolved.
         assert [p["name"] for p in find_node(data["root"], "ou-prod")["policies"]] == [
             "DataPerimeter"

@@ -119,7 +119,7 @@ function sectionsFor(data) {
     { id: "capabilities", text: "Capability Coverage" },
     { id: "checks", text: "Check Results" },
   ];
-  if (data.organization_map || data.organization_map_error) {
+  if (data.organization_map_summary || data.organization_map_error) {
     sections.push({ id: "org-map", text: "Organization Map" });
   }
   if (
@@ -592,6 +592,20 @@ const ORG_ROW_TYPE_LABELS = { root: "Root", ou: "OU", account: "Account" };
 function OrganizationMap({ map, rows, notEnabled, error }) {
   const totals = (map && map.totals) || {};
   const policyErrors = (map && map.policyLookupErrors) || [];
+  const truncatedPaths = (map && map.depthTruncatedPaths) || [];
+  // Paged and filtered, because a large organization renders thousands of
+  // rows otherwise. Not sorted: the row order is the hierarchy. Each row shows
+  // its OU path, so a row stays locatable when its ancestors are on another
+  // page or filtered out.
+  const { items, collectionProps, filterProps, filteredItemsCount, paginationProps } =
+    useCollection(rows, {
+      filtering: {
+        fields: ["name", "id", "path", "status"],
+        empty: <Box textAlign="center">No organization structure to show.</Box>,
+        noMatch: <Box textAlign="center">No OUs or accounts match the filter.</Box>,
+      },
+      pagination: { pageSize: 50 },
+    });
 
   return (
     <SpaceBetween size="m">
@@ -633,10 +647,12 @@ function OrganizationMap({ map, rows, notEnabled, error }) {
                 organization, so no policies of {notEnabled.length > 1 ? "those types" : "that type"} can be attached at any level.
               </Alert>
             )}
-            {map.depthTruncated && (
+            {truncatedPaths.length > 0 && (
               <Alert type="warning" header="OU hierarchy not fully walked">
-                The hierarchy is nested deeper than the levels this map walks, so
-                some OUs and accounts are not listed.
+                The hierarchy is nested deeper than the levels this map walks.
+                The walk stopped below {truncatedPaths.join(", ")}, so some OUs
+                and accounts are not listed. Those rows carry the same warning
+                in the table.
               </Alert>
             )}
             {policyErrors.length > 0 && (
@@ -654,11 +670,21 @@ function OrganizationMap({ map, rows, notEnabled, error }) {
               </Alert>
             )}
             <Table
+              {...collectionProps}
               variant="embedded"
               ariaLabels={{ tableLabel: "Organization structure" }}
-              items={rows}
+              items={items}
               wrapLines
               trackBy="key"
+              filter={
+                <TextFilter
+                  {...filterProps}
+                  filteringPlaceholder="Find an OU or account"
+                  filteringAriaLabel="Filter organization structure"
+                  countText={`${filteredItemsCount} ${filteredItemsCount === 1 ? "match" : "matches"}`}
+                />
+              }
+              pagination={<Pagination {...paginationProps} />}
               columnDefinitions={[
                 {
                   id: "structure",
@@ -670,6 +696,11 @@ function OrganizationMap({ map, rows, notEnabled, error }) {
                         <Box variant={row.kind === "account" ? "span" : "strong"}>
                           {row.name || "(unnamed)"}
                         </Box>
+                        {row.path !== row.name && (
+                          <Box color="text-body-secondary" fontSize="body-s">
+                            {row.path}
+                          </Box>
+                        )}
                         {row.note && (
                           <StatusIndicator type="warning">{row.note}</StatusIndicator>
                         )}
@@ -862,10 +893,10 @@ export default function App({ data }) {
               <Section id="checks">
                 <CheckResults checks={data.checks} summary={data.summary} />
               </Section>
-              {(data.organization_map || data.organization_map_error) && (
+              {(data.organization_map_summary || data.organization_map_error) && (
                 <Section id="org-map">
                   <OrganizationMap
-                    map={data.organization_map}
+                    map={data.organization_map_summary}
                     rows={data.organization_map_rows || []}
                     notEnabled={data.organization_map_not_enabled_labels || []}
                     error={data.organization_map_error}
