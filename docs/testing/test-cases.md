@@ -94,8 +94,10 @@ Owner: ____
 ### A1. Fresh deploy in us-east-1 (baseline happy path)
 - **Precondition:** Management account, no existing assessment source bucket.
 - **Steps:** `./deploy.sh --profile <mgmt> --region us-east-1`
-- **Expected:** Stack creates; CodeBuild `SUCCEEDED`; three files land in
-  `s3://<results-bucket>/<account-id>/` (wafa-report.html, wafa-checks.csv, wafa-raw.json).
+- **Expected:** Stack creates; CodeBuild `SUCCEEDED`; four files land in
+  `s3://<results-bucket>/<account-id>/` (wafa-report.html, wafa-checks.csv,
+  wafa-raw.json, wafa-org-map.csv). The map CSV is written only from a
+  management account; a member or standalone run produces three files.
 
 ### A2. Fresh deploy in a non-us-east-1 region (validates the s3 mb flag fix)
 - **Precondition:** Clean account (no prior assessment source bucket), OR fully
@@ -184,7 +186,9 @@ Owner: ____
 
 ### B1. run-local.sh from CloudShell in the management account
 - **Steps:** clone repo, `./run-local.sh`
-- **Expected:** Deps install; assessment runs; three report files written to the current dir.
+- **Expected:** Deps install; assessment runs; four report files written to the current
+  dir from a management account (three plus `wafa-org-map.csv`), or three from a
+  member or standalone account.
 
 ### B2. Local run with explicit S3 output
 - **Steps:** `python -m src.main --output s3://<some-bucket>/wafa/`
@@ -347,7 +351,7 @@ For each, set up the "good" and "bad" state and confirm status flips correctly.
   is listed on the parent, and *not* repeated on child OUs or accounts. This is the most
   commonly misread part of the output.
 - Member/standalone account. **Expected:** no Organization Map section, and no
-  `wafa-org-map.csv` or diagram files — absent, not an errored section.
+  `wafa-org-map.csv` — absent, not an errored section.
 
 ### E13. Policy type coverage in the map (FR-12.3)
 - With RCPs not enabled, confirm the section states that RCP is not enabled rather
@@ -437,10 +441,17 @@ Owner: ____
 ### G9. Organization map CSV (FR-12.4)
 - `wafa-org-map.csv` opens in a spreadsheet with 10 columns and one row per root,
   OU, and account.
-- Confirm it agrees with the report's Organization Map table, including account
-  placement and the SCP, RCP, and other-policy columns.
+- Confirm it agrees with the report's Organization Map table. The report shows one
+  badge column for all attached policies, while the CSV splits them into SCP, RCP,
+  and other columns — check the same policies appear, not the same layout.
 - An OU or account name containing a comma or quote round-trips correctly
   (the csv module quotes it).
+- **Formula injection:** if any OU or account name begins with `=`, `+`, `-` or `@`,
+  confirm the cell is prefixed with an apostrophe and the spreadsheet shows it as
+  literal text rather than evaluating it.
+- **Partial maps are flagged:** when a policy lookup was denied or throttled, or the
+  hierarchy was deeper than the walk goes, the root row's Error cell says so. An
+  incomplete map must never look complete in the spreadsheet.
 
 ---
 

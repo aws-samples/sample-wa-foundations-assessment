@@ -646,6 +646,9 @@ organizations:ListAWSServiceAccessForOrganization
 organizations:ListRoots
 organizations:ListAccounts
 organizations:ListOrganizationalUnitsForParent
+organizations:ListAccountsForParent
+organizations:ListPolicies
+organizations:ListTargetsForPolicy
 organizations:ListDelegatedAdministrators
 organizations:ListDelegatedServicesForAccount
 controltower:ListLandingZones

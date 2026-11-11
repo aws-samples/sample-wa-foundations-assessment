@@ -224,8 +224,10 @@ Check requirements:
 - Use exact, stable check names because maturity scoring and capability axes
   join results by name.
 
-`delegated_admin.py` is informational and intentionally does not use the
-pass/fail check shape.
+`delegated_admin.py` and `org_map.py` are informational and intentionally do
+not use the pass/fail check shape. Keep them that way: neither contributes to
+maturity scoring or the capability axes, and neither result is appended to
+`checks`. Do not convert them into checks to make their output scoreable.
 
 ## Adding or Changing a Check
 

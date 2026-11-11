@@ -4,7 +4,7 @@
 
 ![License: MIT-0](https://img.shields.io/badge/License-MIT--0-yellow.svg)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
-![Tests](https://img.shields.io/badge/tests-269%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-296%20passing-brightgreen.svg)
 
 WAFA is an open-source AWS foundations assessment tool. Its assessment checks
 use read, list, and describe APIs to evaluate organization-level configuration
@@ -120,11 +120,16 @@ RCPs explicitly when they are not enabled at all.
 
 Attachments are found by listing the organization's policies and then asking
 where each one is attached, rather than asking every OU and account what it
-has. That costs one call per enabled policy type plus one per policy, so it
-scales with the number of policies rather than the size of the organization —
-a 500-OU organization with 50 policies needs roughly 59 calls instead of
-several thousand. Account-level attachments arrive in the same responses, so
-they are always included at no extra cost.
+has. That costs one call per enabled policy type plus one per policy, instead
+of one call per target per policy type, so the attachment lookups stop growing
+with the number of OUs. Account-level attachments arrive in the same responses,
+so they are always included at no extra cost.
+
+Two caveats on that cost. A policy attached to every target, as
+`FullAWSAccess` usually is, pages across all of them, so its own lookup still
+scales with the organization. And the OU walk itself is unchanged, costing two
+calls per OU, so on a large organization most of the runtime is the walk rather
+than the policy lookups.
 
 Suspended accounts are listed with their status rather than omitted, so the map
 matches what the Organizations console shows. If a policy lookup is throttled
@@ -514,14 +519,14 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 
-# Run tests (269 tests)
+# Run tests (296 tests)
 python -m pytest tests/unit/ -v
 
 # Run with coverage
 python -m pytest tests/unit/ --cov=src --cov-report=term-missing
 ```
 
-The current suite contains 269 tests and reports 97% statement coverage.
+The current suite contains 296 tests and reports 97% statement coverage.
 
 ### Report UI
 
@@ -603,7 +608,7 @@ sample-wa-foundations-assessment/
 ├── report-ui/                   # Cloudscape React source for the HTML report
 ├── scripts/                     # Sample report generator
 ├── sample-reports/              # Generated sample report, checks, and org map
-├── tests/unit/                  # 269 pytest tests, 97% coverage
+├── tests/unit/                  # 296 pytest tests, 97% coverage
 ├── deployment/
 │   └── wafa-stack.yaml          # CloudFormation template
 ├── deploy.sh                    # Deployment script
