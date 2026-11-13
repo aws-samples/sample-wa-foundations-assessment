@@ -181,7 +181,24 @@ def _map_level_warnings(org_map):
     return warnings
 
 
-def generate_org_map_csv(org_map, rows):
+_ORG_MAP_HEADER = [
+    "Type",
+    "OU Path",
+    "Name",
+    "ID",
+    "Status",
+    "Depth",
+    "Directly Attached SCPs",
+    "Directly Attached RCPs",
+    "Other Directly Attached Policies",
+    "Error",
+]
+
+# Type cell of the single row written when a run produced no map.
+ORG_MAP_UNAVAILABLE_TYPE = "Not available"
+
+
+def generate_org_map_csv(org_map, rows, unavailable_reason=""):
     """Generate CSV content for the organization and OU account map.
 
     One row per root, OU, and account. Policy columns list only the policies
@@ -198,29 +215,27 @@ def generate_org_map_csv(org_map, rows):
         rows: the flattened rows from ``flatten_rows``. Passed in so the
             console, this CSV, and the HTML report all render the same rows
             from one flattening per run.
+        unavailable_reason: why this run has no map, written when ``rows``
+            is empty.
 
     Returns:
-        str: CSV content, or an empty string when there is no map.
+        str: CSV content. Without a map it is the header plus one row stating
+        why, never empty: the file is written on every run so a report
+        directory or S3 prefix can never keep an earlier run's map beside
+        this run's other reports.
     """
-    if not rows:
-        return ""
-
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(
-        [
-            "Type",
-            "OU Path",
-            "Name",
-            "ID",
-            "Status",
-            "Depth",
-            "Directly Attached SCPs",
-            "Directly Attached RCPs",
-            "Other Directly Attached Policies",
-            "Error",
-        ]
-    )
+    writer.writerow(_ORG_MAP_HEADER)
+
+    if not rows:
+        _write_row(
+            writer,
+            [ORG_MAP_UNAVAILABLE_TYPE]
+            + [""] * (len(_ORG_MAP_HEADER) - 2)
+            + [unavailable_reason],
+        )
+        return output.getvalue()
 
     map_warnings = _map_level_warnings(org_map)
 

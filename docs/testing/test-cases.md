@@ -96,8 +96,8 @@ Owner: ____
 - **Steps:** `./deploy.sh --profile <mgmt> --region us-east-1`
 - **Expected:** Stack creates; CodeBuild `SUCCEEDED`; four files land in
   `s3://<results-bucket>/<account-id>/` (wafa-report.html, wafa-checks.csv,
-  wafa-raw.json, wafa-org-map.csv). The map CSV is written only from a
-  management account; a member or standalone run produces three files.
+  wafa-raw.json, wafa-org-map.csv). A member or standalone run also writes
+  the map CSV, holding only a `Not available` row with the reason.
 
 ### A2. Fresh deploy in a non-us-east-1 region (validates the s3 mb flag fix)
 - **Precondition:** Clean account (no prior assessment source bucket), OR fully
@@ -187,8 +187,8 @@ Owner: ____
 ### B1. run-local.sh from CloudShell in the management account
 - **Steps:** clone repo, `./run-local.sh`
 - **Expected:** Deps install; assessment runs; four report files written to the current
-  dir from a management account (three plus `wafa-org-map.csv`), or three from a
-  member or standalone account.
+  dir, including `wafa-org-map.csv`. From a member or standalone account the map CSV
+  holds only a `Not available` row with the reason.
 
 ### B2. Local run with explicit S3 output
 - **Steps:** `python -m src.main --output s3://<some-bucket>/wafa/`
@@ -350,8 +350,13 @@ For each, set up the "good" and "bad" state and confirm status flips correctly.
 - **Directly attached vs inherited:** attach an SCP to a parent OU only. **Expected:** it
   is listed on the parent, and *not* repeated on child OUs or accounts. This is the most
   commonly misread part of the output.
-- Member/standalone account. **Expected:** no Organization Map section, and no
-  `wafa-org-map.csv` — absent, not an errored section.
+- Member/standalone account. **Expected:** no Organization Map section (absent, not an
+  errored section), and `wafa-org-map.csv` holds only the header and a `Not available` row
+  saying the map runs only from the management account.
+- **No stale map (FR-12.4):** run from the management account, then run into the same
+  output directory or S3 prefix from a member account, or with Organizations reads denied.
+  **Expected:** `wafa-org-map.csv` is replaced by a `Not available` row giving the reason;
+  none of the first run's OUs, accounts, or policies remain.
 - **Deeply nested hierarchy (6+ levels):** the OU where the walk stopped shows the warning
   on its own row, naming how many child OUs are not listed, and the section header warning
   names that OU's path. The same condition must not be stated twice on one surface.

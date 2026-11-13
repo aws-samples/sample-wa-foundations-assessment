@@ -4,6 +4,8 @@ Mocks all boto3 calls to simulate a full assessment run without real AWS credent
 Tests both management account (full) and non-management account (limited) flows.
 """
 
+import csv
+import io
 import json
 import os
 import subprocess
@@ -908,8 +910,13 @@ class TestOrganizationMapOrchestration:
         mock_parse_args,
         tmp_path,
     ):
-        """A member account produces no map rather than an errored one."""
+        """A member account produces no map rather than an errored one.
+
+        Its map CSV still replaces an earlier run's, which would otherwise
+        sit beside this run's reports and read as the current map.
+        """
         output_dir = str(tmp_path)
+        _write_stale_org_map_csv(output_dir)
         mock_parse_args.return_value = MagicMock(output=output_dir)
         factory = _mock_member_account_boto3()
         mock_acct_client.side_effect = factory
@@ -923,7 +930,10 @@ class TestOrganizationMapOrchestration:
             raw = json.load(f)
         assert raw["organization_map"] is None
         assert raw["organization_map_error"] is None
-        assert not os.path.exists(os.path.join(output_dir, "wafa-org-map.csv"))
+        rows = _read_org_map_csv(output_dir)
+        assert len(rows) == 2
+        assert rows[1][0] == "Not available"
+        assert "only from the organization's management account" in rows[1][9]
 
     @patch("src.main.parse_args")
     @patch("src.main.get_organization_map")
@@ -949,8 +959,9 @@ class TestOrganizationMapOrchestration:
         mock_parse_args,
         tmp_path,
     ):
-        """A map failure surfaces in the report and writes no map CSV."""
+        """A map failure surfaces in the report and in a replaced map CSV."""
         output_dir = str(tmp_path)
+        _write_stale_org_map_csv(output_dir)
         mock_parse_args.return_value = MagicMock(output=output_dir)
         mock_get_org_map.return_value = (None, "AccessDeniedException")
         factory = _mock_management_account_boto3()
@@ -976,7 +987,42 @@ class TestOrganizationMapOrchestration:
         assert raw["organization_map_error"] == "AccessDeniedException"
         with open(os.path.join(output_dir, "wafa-report.html")) as f:
             assert "AccessDeniedException" in f.read()
-        assert not os.path.exists(os.path.join(output_dir, "wafa-org-map.csv"))
+        rows = _read_org_map_csv(output_dir)
+        assert len(rows) == 2
+        assert rows[1][0] == "Not available"
+        assert rows[1][9] == (
+            "Organization map could not be built: AccessDeniedException"
+        )
+
+    @patch("src.main.parse_args")
+    @patch("src.main.detect_partition")
+    @patch("boto3.client")
+    def test_s3_output_replaces_the_org_map_csv_without_a_map(
+        self, mock_client, mock_partition, mock_parse_args
+    ):
+        """CodeBuild reuses one prefix per account, so the key is overwritten."""
+        mock_parse_args.return_value = MagicMock(output="s3://results-bucket/reports")
+        mock_partition.return_value = {
+            "partition": "aws",
+            "default_region": "us-east-1",
+        }
+        base_factory = _mock_member_account_boto3()
+        mock_s3 = MagicMock()
+
+        def client_factory(service, **kwargs):
+            if service == "s3":
+                return mock_s3
+            return base_factory(service, **kwargs)
+
+        mock_client.side_effect = client_factory
+
+        run()
+
+        uploaded = {
+            call.kwargs["Key"].rsplit("/", 1)[-1]: call.kwargs
+            for call in mock_s3.put_object.call_args_list
+        }
+        assert "Not available" in uploaded["wafa-org-map.csv"]["Body"]
 
     @patch("src.main.parse_args")
     @patch("src.main.detect_partition")
@@ -1190,7 +1236,10 @@ class TestRunStandaloneAccount:
             raw = json.load(f)
         assert raw["organization_map"] is None
         assert raw["organization_map_error"] is None
-        assert not os.path.exists(os.path.join(output_dir, "wafa-org-map.csv"))
+        rows = _read_org_map_csv(output_dir)
+        assert len(rows) == 2
+        assert rows[1][0] == "Not available"
+        assert "only from the organization's management account" in rows[1][9]
 
     @patch("src.main.parse_args")
     @patch("src.checks.account_resources.boto3.client")
@@ -1278,7 +1327,9 @@ class TestRunUnknownAccountType:
         # map is absent rather than reported as a failure.
         assert raw["organization_map"] is None
         assert raw["organization_map_error"] is None
-        assert not (tmp_path / "wafa-org-map.csv").exists()
+        rows = _read_org_map_csv(str(tmp_path))
+        assert rows[1][0] == "Not available"
+        assert "account type could not be determined" in rows[1][9]
 
 
 # ============================================================================
@@ -1420,6 +1471,23 @@ def test_exit_code_fails_only_when_every_check_errors():
 # ============================================================================
 # FR-12.5 — organization map console summary
 # ============================================================================
+
+
+STALE_ACCOUNT_ID = "999999999999"
+
+
+def _write_stale_org_map_csv(output_dir):
+    """Leave a map CSV from an earlier run in the output directory."""
+    with open(os.path.join(output_dir, "wafa-org-map.csv"), "w") as f:
+        f.write(f"Type,OU Path,Name,ID\r\nAccount,Root,Old,{STALE_ACCOUNT_ID}\r\n")
+
+
+def _read_org_map_csv(output_dir):
+    """Parse the map CSV and assert none of the earlier run's data remains."""
+    with open(os.path.join(output_dir, "wafa-org-map.csv"), newline="") as f:
+        content = f.read()
+    assert STALE_ACCOUNT_ID not in content
+    return list(csv.reader(io.StringIO(content)))
 
 
 def _summary_map(**overrides):

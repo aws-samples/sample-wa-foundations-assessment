@@ -173,9 +173,22 @@ class TestOrgMapCsv:
         parsed = list(csv.reader(io.StringIO(content)))
         assert parsed[1][2] == 'Prod, "Core"'
 
-    def test_empty_without_a_map(self):
-        assert generate_org_map_csv(None, flatten_rows(None)) == ""
-        assert generate_org_map_csv({}, flatten_rows({})) == ""
+    def test_without_a_map_writes_the_header_and_the_reason(self):
+        """Never empty, so a run without a map still replaces an older file."""
+        for data in (None, {}):
+            content = generate_org_map_csv(
+                data, flatten_rows(data), "Organization map not built: member account."
+            )
+            parsed = list(csv.reader(io.StringIO(content)))
+            assert parsed[0][:3] == ["Type", "OU Path", "Name"]
+            assert len(parsed) == 2
+            assert parsed[1][0] == "Not available"
+            assert parsed[1][9] == "Organization map not built: member account."
+
+    def test_unavailable_reason_is_formula_escaped(self):
+        """The reason can carry an AWS error message."""
+        content = generate_org_map_csv(None, [], "=cmd|' /c calc'!A0")
+        assert list(csv.reader(io.StringIO(content)))[1][9].startswith("'")
 
 
 class TestFormulaInjection:

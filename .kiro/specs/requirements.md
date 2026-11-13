@@ -428,6 +428,11 @@ so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. 
   SCPs, RCPs, and other policy types into their own columns. Keep it separate from `wafa-checks.csv`, which
   stays one row per check. Escape cells that begin with `=`, `+`, `-`, `@`, tab, or CR so AWS-provided
   names and error messages cannot execute as spreadsheet formulas.
+  - Write `wafa-org-map.csv` on every run, in every account mode. Without a map (a limited-mode run, an
+    undetermined account type, or a map that could not be built) it holds the header plus one row whose
+    Type is `Not available` and whose Error cell states the reason. Reports go to fixed file names in one
+    directory or S3 prefix per account, so skipping the file would leave an earlier run's map beside this
+    run's reports, where it reads as the current result.
   - The root row's Error cell carries every reason the map may be incomplete, so a reader who opens only
     the spreadsheet cannot mistake a partial map for a complete one: the `policyLookupErrors` messages,
     which belong to no row, plus a count and the affected paths for the conditions that do (see FR-12.6).

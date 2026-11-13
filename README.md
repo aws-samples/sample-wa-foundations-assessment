@@ -4,7 +4,7 @@
 
 ![License: MIT-0](https://img.shields.io/badge/License-MIT--0-yellow.svg)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
-![Tests](https://img.shields.io/badge/tests-329%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-331%20passing-brightgreen.svg)
 
 WAFA is an open-source AWS foundations assessment tool. Its assessment checks
 use read, list, and describe APIs to evaluate organization-level configuration
@@ -108,6 +108,12 @@ policies attached at each level. It appears as an **Organization Map** section
 in the HTML report and as `wafa-org-map.csv`, one row per root, OU, and
 account, with separate columns for directly attached SCPs, RCPs, and other
 policy types.
+
+`wafa-org-map.csv` is written on every run. When a run has no map, for example
+a member or standalone account or a map that could not be built, the file holds
+the header and one `Not available` row giving the reason. A run therefore
+always replaces the previous run's map in the same directory or S3 prefix
+instead of leaving it beside the new reports.
 
 It is **informational only** and does not affect any check result or the
 maturity level. The scored view of the same services stays with the existing
@@ -527,14 +533,14 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 
-# Run tests (329 tests)
+# Run tests (331 tests)
 python -m pytest tests/unit/ -v
 
 # Run with coverage
 python -m pytest tests/unit/ --cov=src --cov-report=term-missing
 ```
 
-The current suite contains 329 tests and reports 98% statement coverage.
+The current suite contains 331 tests and reports 98% statement coverage.
 
 ### Report UI
 
@@ -617,7 +623,7 @@ sample-wa-foundations-assessment/
 ├── report-ui/                   # Cloudscape React source for the HTML report
 ├── scripts/                     # Sample report generator
 ├── sample-reports/              # Generated sample report, checks, and org map
-├── tests/unit/                  # 329 pytest tests, 98% coverage
+├── tests/unit/                  # 331 pytest tests, 98% coverage
 ├── deployment/
 │   └── wafa-stack.yaml          # CloudFormation template
 ├── deploy.sh                    # Deployment script

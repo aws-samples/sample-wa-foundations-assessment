@@ -168,6 +168,23 @@ def print_org_map_summary(org_map, org_map_error, rows):
         )
 
 
+def _org_map_unavailable_reason(account_info, org_map_error):
+    """Explain why a run has no organization map, for its CSV."""
+    if account_info.get("account_type") == "unknown":
+        return (
+            "Organization map not built: the account type could not be "
+            "determined, so the limited assessment ran."
+        )
+    if not account_info.get("is_management_account"):
+        return (
+            "Organization map not built: it runs only from the organization's "
+            "management account."
+        )
+    if org_map_error:
+        return f"Organization map could not be built: {org_map_error}"
+    return "Organization map not built: this account is not in an AWS Organization."
+
+
 def upload_to_s3(output_path, account_id, files):
     """Upload report files to S3 if output is an S3 URI."""
     # Parse S3 URI
@@ -327,10 +344,20 @@ def run():
         ("wafa-raw.json", raw_json, "application/json"),
     ]
 
-    # FR-12.4: organization map CSV, only when there is a map.
-    org_map_csv = generate_org_map_csv(org_map, org_map_rows)
-    if org_map_csv:
-        report_files.append(("wafa-org-map.csv", org_map_csv, "text/csv"))
+    # FR-12.4: the organization map CSV is written on every run, stating why
+    # when there is no map. Skipping it would leave an earlier run's map in
+    # the same directory or S3 prefix, where it reads as the current result.
+    report_files.append(
+        (
+            "wafa-org-map.csv",
+            generate_org_map_csv(
+                org_map,
+                org_map_rows,
+                _org_map_unavailable_reason(account_info, org_map_error),
+            ),
+            "text/csv",
+        )
+    )
 
     # 7. Output reports
     if args.output.startswith("s3://"):
