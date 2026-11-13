@@ -40,6 +40,7 @@ function orgMapSummary(overrides = {}) {
     policyLookupErrors: [],
     depthTruncatedPaths: [],
     nodeListingErrorPaths: [],
+    policyTypesPendingWarnings: [],
     ...overrides,
   };
 }
@@ -453,8 +454,30 @@ describe("report UI", () => {
   it("notes guardrail policy types that are not enabled", () => {
     const { container } = renderReport();
     expect(container.querySelector("#org-map").textContent).toContain(
-      "RCP not enabled in this organization",
+      "RCP is not enabled in this organization, so no policies of that type",
     );
+  });
+
+  it("uses the plural when both guardrail policy types are not enabled", () => {
+    const { container } = renderReport({
+      organization_map_not_enabled_labels: ["SCP", "RCP"],
+    });
+    expect(container.querySelector("#org-map").textContent).toContain(
+      "SCP and RCP are not enabled in this organization, so no policies of those types",
+    );
+  });
+
+  it("warns when a policy type is changing state", () => {
+    const warning =
+      "SCP is changing state (PENDING_ENABLE), so its attachments are not mapped";
+    const { container } = renderReport({
+      organization_map_summary: orgMapSummary({
+        policyTypesPendingWarnings: [warning],
+      }),
+    });
+    const section = container.querySelector("#org-map").textContent;
+    expect(section).toContain("Policy types changing state");
+    expect(section).toContain(warning);
   });
 
   it("shows account-level policy attachments", () => {
@@ -468,13 +491,13 @@ describe("report UI", () => {
     const { container } = renderReport({
       organization_map_summary: orgMapSummary({
         policyLookupErrors: [
-          { scope: "INSPECTOR_POLICY", error: "TooManyRequestsException" },
+          { scope: "Inspector", error: "TooManyRequestsException" },
         ],
       }),
     });
     const section = container.querySelector("#org-map").textContent;
     expect(section).toContain("Attached policies may be incomplete");
-    expect(section).toContain("INSPECTOR_POLICY");
+    expect(section).toContain("Inspector: TooManyRequestsException");
     expect(section).toContain("TooManyRequestsException");
   });
 

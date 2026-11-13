@@ -26,7 +26,11 @@ from src.discovery.account_type import detect_account_type, detect_partition
 from src.discovery.regions import discover_regions
 from src.report.csv_export import generate_csv, generate_org_map_csv
 from src.report.html_report import generate_html
-from src.report.policy_labels import policy_type_label
+from src.report.policy_labels import (
+    lookup_error_scope,
+    pending_policy_type_warning,
+    policy_type_label,
+)
 
 # Upper bound on organization map warning lines printed to the console, so a
 # large or throttled organization cannot bury the assessment results.
@@ -121,8 +125,11 @@ def print_org_map_summary(org_map, org_map_error, rows):
     # The totals above count what was read, so say plainly how many nodes
     # could not be read before listing the individual warnings, which the cap
     # below may truncate.
-    incomplete_nodes = len(org_map.get("nodeListingErrorPaths") or []) + len(
-        org_map.get("depthTruncatedPaths") or []
+    # A node can be in both lists (its account listing failed and the walk
+    # stopped below it), so count distinct paths rather than adding lengths.
+    incomplete_nodes = len(
+        set(org_map.get("nodeListingErrorPaths") or [])
+        | set(org_map.get("depthTruncatedPaths") or [])
     )
     if incomplete_nodes:
         print(
@@ -131,9 +138,14 @@ def print_org_map_summary(org_map, org_map_error, rows):
         )
 
     warnings = [
-        f"Attachments may be incomplete for {failure['scope']}: {failure['error']}"
+        f"Attachments may be incomplete for {lookup_error_scope(failure)}: "
+        f"{failure['error']}"
         for failure in org_map.get("policyLookupErrors") or []
     ]
+    warnings.extend(
+        pending_policy_type_warning(pending)
+        for pending in org_map.get("policyTypesPending") or []
+    )
     # Per-node warnings: a denied ListAccountsForParent, an unreadable child
     # OU, or a walk stopped at the nesting limit. Each names the node it
     # applies to, so the gap is locatable rather than just flagged.

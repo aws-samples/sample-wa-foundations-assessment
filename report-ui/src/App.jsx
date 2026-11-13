@@ -594,6 +594,7 @@ function OrganizationMap({ map, rows, notEnabled, error }) {
   const policyErrors = (map && map.policyLookupErrors) || [];
   const truncatedPaths = (map && map.depthTruncatedPaths) || [];
   const listingErrorPaths = (map && map.nodeListingErrorPaths) || [];
+  const pendingWarnings = (map && map.policyTypesPendingWarnings) || [];
   // Paged and filtered, because a large organization renders thousands of
   // rows otherwise. Not sorted: the row order is the hierarchy. Each row shows
   // its OU path, so a row stays locatable when its ancestors are on another
@@ -644,8 +645,11 @@ function OrganizationMap({ map, rows, notEnabled, error }) {
             />
             {notEnabled.length > 0 && (
               <Alert type="info" header="Guardrail policy types not enabled">
-                {notEnabled.join(" and ")} not enabled in this
-                organization, so no policies of {notEnabled.length > 1 ? "those types" : "that type"} can be attached at any level.
+                {notEnabled.join(" and ")}{" "}
+                {notEnabled.length > 1 ? "are" : "is"} not enabled in this
+                organization, so no policies of{" "}
+                {notEnabled.length > 1 ? "those types" : "that type"} can be
+                attached at any level.
               </Alert>
             )}
             {listingErrorPaths.length > 0 && (
@@ -662,6 +666,15 @@ function OrganizationMap({ map, rows, notEnabled, error }) {
                 The walk stopped below {truncatedPaths.join(", ")}, so some OUs
                 and accounts are not listed. Those rows carry the same warning
                 in the table.
+              </Alert>
+            )}
+            {pendingWarnings.length > 0 && (
+              <Alert type="warning" header="Policy types changing state">
+                <SpaceBetween size="xxs">
+                  {pendingWarnings.map((warning) => (
+                    <Box key={warning}>{warning}</Box>
+                  ))}
+                </SpaceBetween>
               </Alert>
             )}
             {policyErrors.length > 0 && (

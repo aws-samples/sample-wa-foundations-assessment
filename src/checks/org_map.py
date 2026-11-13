@@ -70,6 +70,9 @@ _MAX_WORKERS = 4
 # types are in use rather than staying silent when they are not enabled.
 ALWAYS_REPORTED_POLICY_TYPES = ("SERVICE_CONTROL_POLICY", "RESOURCE_CONTROL_POLICY")
 
+# Root policy-type statuses that mean the type is mid-transition.
+_PENDING_POLICY_TYPE_STATUSES = frozenset({"PENDING_ENABLE", "PENDING_DISABLE"})
+
 # A policy type the root reports as ENABLED but that ``ListPolicies`` then
 # rejects as not enabled or not supported. Only the types enabled on the root
 # are queried, so these codes are a disagreement between two AWS answers, not
@@ -178,8 +181,8 @@ def _build_tree(client, root_id, root_name, stats):
 
                 if child_ous and node["depth"] >= MAX_OU_DEPTH:
                     # Children exist beyond the documented nesting limit, so
-                    # this walk stopped short: say so instead of implying the
-                    # map is complete. An OU sitting exactly at the limit has
+                    # the walk stops at this node: say so instead of implying
+                    # the map is complete. An OU sitting exactly at the limit has
                     # no children, which is not truncation. The note is
                     # recorded on the node that was cut off, so every output
                     # names the exact place the map stops.
@@ -299,24 +302,31 @@ def _list_targets_for_policy(client, policy_id):
     return targets
 
 
-def _lookup_error(scope, exc):
+def _lookup_error(policy_type, exc, policy_name=None):
     """Describe one failed policy lookup, choosing the message by error code.
 
     A single handler for every failure, so no branch can be added later that
     swallows one instead of reporting it.
+
+    ``scope`` stays in raw API terms, like each policy's ``type``. The
+    structured ``policyType`` and ``policyName`` let every display render the
+    same label as the policy badges (see ``policy_labels.lookup_error_scope``).
     """
+    scope = f"{policy_type}: {policy_name}" if policy_name else policy_type
+    failure = {"scope": scope, "policyType": policy_type}
+    if policy_name:
+        failure["policyName"] = policy_name
     code = ""
     if isinstance(exc, ClientError):
         code = exc.response.get("Error", {}).get("Code", "")
     if code in _POLICY_TYPE_CONTRADICTION_CODES:
-        return {
-            "scope": scope,
-            "error": (
-                "The organization root reports this policy type as ENABLED, "
-                f"but listing its policies failed: {exc}"
-            ),
-        }
-    return {"scope": scope, "error": str(exc)}
+        failure["error"] = (
+            "The organization root reports this policy type as ENABLED, "
+            f"but listing its policies failed: {exc}"
+        )
+    else:
+        failure["error"] = str(exc)
+    return failure
 
 
 def _attach_policies(client, root, policy_types):
@@ -377,7 +387,7 @@ def _attach_policies(client, root, policy_types):
             try:
                 attached_to = future.result()
             except Exception as e:
-                errors.append(_lookup_error(f"{summary['type']}: {summary['name']}", e))
+                errors.append(_lookup_error(summary["type"], e, summary["name"]))
                 continue
             for target in attached_to:
                 container = targets_by_id.get(target.get("TargetId"))
@@ -418,11 +428,31 @@ def get_organization_map():
         if not roots:
             return None, "ListRoots returned no organization root."
         root = roots[0]
-        enabled_policy_types = sorted(
-            policy_type.get("Type")
+        root_policy_types = [
+            policy_type
             for policy_type in root.get("PolicyTypes", [])
-            if policy_type.get("Status") == "ENABLED" and policy_type.get("Type")
+            if policy_type.get("Type")
+        ]
+        enabled_policy_types = sorted(
+            policy_type["Type"]
+            for policy_type in root_policy_types
+            if policy_type.get("Status") == "ENABLED"
         )
+        # PENDING_ENABLE and PENDING_DISABLE are transitions, not answers:
+        # the type is neither confirmed enabled nor confirmed absent. Its
+        # policies are not listed, and the map says so rather than reporting
+        # the type as "not enabled" or silently omitting its attachments.
+        pending_policy_types = sorted(
+            (
+                {"type": policy_type["Type"], "status": policy_type["Status"]}
+                for policy_type in root_policy_types
+                if policy_type.get("Status") in _PENDING_POLICY_TYPE_STATUSES
+            ),
+            key=lambda item: item["type"],
+        )
+        known_policy_types = set(enabled_policy_types) | {
+            item["type"] for item in pending_policy_types
+        }
 
         root_name = root.get("Name") or "Root"
         root_node = _build_tree(client, root.get("Id", ""), root_name, stats)
@@ -437,8 +467,9 @@ def get_organization_map():
             "policyTypesNotEnabled": [
                 policy_type
                 for policy_type in ALWAYS_REPORTED_POLICY_TYPES
-                if policy_type not in enabled_policy_types
+                if policy_type not in known_policy_types
             ],
+            "policyTypesPending": pending_policy_types,
             "policyLookupErrors": policy_errors,
             "totals": {
                 "organizationalUnits": stats["organizational_units"],

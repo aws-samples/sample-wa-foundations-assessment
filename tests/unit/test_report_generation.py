@@ -305,6 +305,7 @@ class TestGenerateHtml:
             "organizationId": "o-example12345",
             "totals": org_map["totals"],
             "policyLookupErrors": [],
+            "policyTypesPendingWarnings": [],
             "depthTruncatedPaths": ["Root/Workloads/Production"],
             "nodeListingErrorPaths": ["Root/Workloads"],
         }
@@ -312,6 +313,39 @@ class TestGenerateHtml:
         rows = data["organization_map_rows"]
         assert len(rows) == len(flatten_rows(org_map))
         assert rows[0]["key"] == "0:root:r-root"
+
+    def test_report_data_labels_policy_lookup_scopes_and_pending_types(self):
+        """Alerts use the same policy-type labels as the badges."""
+        org_map = _make_org_map()
+        org_map["policyLookupErrors"] = [
+            {
+                "scope": "TAG_POLICY: RequireCostCenterTag",
+                "policyType": "TAG_POLICY",
+                "policyName": "RequireCostCenterTag",
+                "error": "TooManyRequestsException",
+            }
+        ]
+        org_map["policyTypesPending"] = [
+            {"type": "SERVICE_CONTROL_POLICY", "status": "PENDING_ENABLE"}
+        ]
+        summary = _report_data(
+            generate_html(
+                _make_checks(),
+                _make_maturity(),
+                org_map=org_map,
+                org_map_rows=flatten_rows(org_map),
+            )
+        )["organization_map_summary"]
+
+        assert summary["policyLookupErrors"] == [
+            {"scope": "Tag: RequireCostCenterTag", "error": "TooManyRequestsException"}
+        ]
+        assert summary["policyTypesPendingWarnings"] == [
+            (
+                "SCP is changing state (PENDING_ENABLE), so its attachments are "
+                "not mapped; re-run the assessment once it settles"
+            )
+        ]
 
     def test_report_data_row_keys_are_unique_without_ids(self):
         """An AWS id defaults to "", so a key built from it alone collides.

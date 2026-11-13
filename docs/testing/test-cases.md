@@ -366,8 +366,15 @@ For each, set up the "good" and "bad" state and confirm status flips correctly.
   confirm the Alert is still there — a row note alone is not sufficient.
 
 ### E13. Policy type coverage in the map (FR-12.3)
-- With RCPs not enabled, confirm the section states that RCP is not enabled rather
-  than silently showing nothing.
+- With RCPs not enabled, confirm the section states "RCP is not enabled" rather
+  than silently showing nothing (and "SCP and RCP are not enabled" when both are off).
+- Immediately after enabling or disabling a policy type, while the root reports it as
+  `PENDING_ENABLE` or `PENDING_DISABLE`: **expected:** the type appears in
+  `policyTypesPending`, not in `policyTypesNotEnabled`, and the report, the CSV root row,
+  and the console all say it is changing state and its attachments are not mapped.
+- A policy lookup failure is labelled like the policy badges (for example
+  `Tag: RequireCostCenterTag`), never with the API constant, in the report, the CSV, and
+  the console.
 - Enable Tag or Backup policies and attach one. **Expected:** it appears under the
   "Other Directly Attached Policies" CSV column and as a badge in the report.
 - Attach an SCP directly to an *account*. **Expected:** it appears on that account's row,

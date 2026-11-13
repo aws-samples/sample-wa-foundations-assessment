@@ -414,11 +414,16 @@ so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. 
   - Configure the Organizations client with **adaptive** retries. Organizations enforces a low request rate
     and standard mode has no client-side rate limiting, so a burst of concurrent reads exhausts its attempts
     and silently loses attachments.
-  - Any other failure is recorded in `policyLookupErrors` as `{scope, error}`, where `scope` is the policy
-    type (when listing policies failed) or `"<type>: <name>"` (when listing one policy's targets failed).
-    An error means attachments may be incomplete and must be surfaced rather than rendered as an empty list.
+  - Any other failure is recorded in `policyLookupErrors` as `{scope, policyType, policyName?, error}`,
+    where `scope` is the raw policy type (when listing policies failed) or `"<type>: <name>"` (when listing
+    one policy's targets failed), and `policyName` is present only in the second case. An error means
+    attachments may be incomplete and must be surfaced rather than rendered as an empty list. Every display
+    renders the scope from `policyType` and `policyName` with the same label as the policy badges (FR-12.5).
   - Report `policyTypesNotEnabled` for SERVICE_CONTROL_POLICY and RESOURCE_CONTROL_POLICY so the map states
-    plainly when a guardrail type is not in use at all.
+    plainly when a guardrail type is not in use at all. A type the root reports as `PENDING_ENABLE` or
+    `PENDING_DISABLE` is mid-transition, neither enabled nor confirmed absent: do not query it, do not list it
+    in `policyTypesNotEnabled`, and record it in `policyTypesPending` as `{type, status}` so every output warns
+    that its attachments are not mapped (see FR-12.6).
 - FR-12.4: Generate `wafa-org-map.csv` with one row per root, OU, and account, separating directly attached
   SCPs, RCPs, and other policy types into their own columns. Keep it separate from `wafa-checks.csv`, which
   stays one row per check. Escape cells that begin with `=`, `+`, `-`, `@`, tab, or CR so AWS-provided
@@ -443,14 +448,15 @@ so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. 
     finished policy labels and a row key that leads with the row's position, because an AWS id defaults to
     an empty string and two rows missing an id would otherwise share a key) and
     `organization_map_summary`, which holds only the map-level fields the UI reads: `organizationId`,
-    `totals`, `policyLookupErrors`, `depthTruncatedPaths`, and `nodeListingErrorPaths`. The HTML must not
+    `totals`, `policyLookupErrors` (with labelled scopes), `policyTypesPendingWarnings`,
+    `depthTruncatedPaths`, and `nodeListingErrorPaths`. The HTML must not
     embed the tree as well, which would roughly double the inline JSON for data the UI never reads.
   - Flatten the tree once per run and pass the same rows to the console, the CSV, and the HTML report, so
     the three cannot disagree.
   - A per-node failure is recorded on that node as `accountsError` or `childrenError` and keeps the rest of
     the map, mirroring FR-9's partial-result behavior. Policy lookup failures are organization-wide rather
     than per-node and are reported through `policyLookupErrors`.
-  - The console states how many nodes could not be fully listed before printing the individual warnings,
+  - The console states how many distinct nodes could not be fully listed before printing the individual warnings,
     then prints every map-level and per-node warning, each naming its node, capped with a count of the
     withheld lines. A throttled large organization can produce a warning per node, which would otherwise
     push the check results off-screen; the HTML report and the CSV carry them all.
@@ -464,7 +470,8 @@ so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. 
     the affected nodes. The report renders an Alert above the table, the CSV writes it to the root row, and
     the console prints the count. A per-row note alone is not sufficient: the row may be filtered out or on
     a later page of a paged table.
-  - `policyLookupErrors` has no row of its own, so its message appears at map level only.
+  - `policyLookupErrors` and `policyTypesPending` have no row of their own, so their messages appear at map
+    level only.
 - FR-12.7: Reads that every organization check shares — `DescribeOrganization` and `ListRoots` — are
   resolved once per run through `src/checks/org_api.py` rather than once per check. Cache successful
   responses only, so one denied or throttled read does not become an error for every later check, and

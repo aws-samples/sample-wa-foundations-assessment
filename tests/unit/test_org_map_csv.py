@@ -256,13 +256,27 @@ class TestPartialMapIsFlagged:
     def test_policy_lookup_errors_reach_the_root_error_cell(self):
         data = org_map(
             policyLookupErrors=[
-                {"scope": "INSPECTOR_POLICY", "error": "TooManyRequestsException"}
+                {
+                    "scope": "INSPECTOR_POLICY",
+                    "policyType": "INSPECTOR_POLICY",
+                    "error": "TooManyRequestsException",
+                }
             ]
         )
         root_error = rows_for(data)[1][9]
-        assert "may be incomplete" in root_error
-        assert "INSPECTOR_POLICY" in root_error
+        assert "may be incomplete for Inspector:" in root_error
+        assert "INSPECTOR_POLICY" not in root_error
         assert "TooManyRequestsException" in root_error
+
+    def test_pending_policy_types_reach_the_root_error_cell(self):
+        data = org_map(
+            policyTypesPending=[
+                {"type": "RESOURCE_CONTROL_POLICY", "status": "PENDING_DISABLE"}
+            ]
+        )
+        root_error = rows_for(data)[1][9]
+        assert "RCP is changing state (PENDING_DISABLE)" in root_error
+        assert "attachments are not mapped" in root_error
 
     def test_depth_truncation_is_summarized_at_the_root_and_explained_on_the_node(
         self,

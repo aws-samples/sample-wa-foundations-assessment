@@ -41,3 +41,34 @@ def labelled_policies(policies):
         dict(policy, typeLabel=policy_type_label(policy.get("type")))
         for policy in policies or []
     ]
+
+
+def lookup_error_scope(failure):
+    """Return the display scope of one ``policyLookupErrors`` entry.
+
+    ``wafa-raw.json`` keeps the raw ``scope`` (``TAG_POLICY`` or
+    ``TAG_POLICY: Name``), like the raw ``type`` on each policy. Every display
+    renders it through this function instead, so a failure reads
+    ``Tag: Name`` beside the ``Tag: Name`` badge for the same policy.
+    """
+    policy_type = failure.get("policyType")
+    if not policy_type:
+        return failure.get("scope", "")
+    label = policy_type_label(policy_type)
+    name = failure.get("policyName")
+    return f"{label}: {name}" if name else label
+
+
+def pending_policy_type_warning(pending):
+    """Describe one ``policyTypesPending`` entry for display.
+
+    A type whose root status is ``PENDING_ENABLE`` or ``PENDING_DISABLE`` is
+    changing state, so it is neither enabled nor absent: its policies are not
+    listed and any attachments are left out of the map.
+    """
+    label = policy_type_label(pending.get("type", ""))
+    status = pending.get("status", "")
+    return (
+        f"{label} is changing state ({status}), so its attachments are not "
+        "mapped; re-run the assessment once it settles"
+    )

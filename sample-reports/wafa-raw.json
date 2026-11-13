@@ -635,6 +635,7 @@
     "policyTypesNotEnabled": [
       "RESOURCE_CONTROL_POLICY"
     ],
+    "policyTypesPending": [],
     "policyLookupErrors": [],
     "totals": {
       "organizationalUnits": 3,

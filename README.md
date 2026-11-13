@@ -4,7 +4,7 @@
 
 ![License: MIT-0](https://img.shields.io/badge/License-MIT--0-yellow.svg)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
-![Tests](https://img.shields.io/badge/tests-322%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-329%20passing-brightgreen.svg)
 
 WAFA is an open-source AWS foundations assessment tool. Its assessment checks
 use read, list, and describe APIs to evaluate organization-level configuration
@@ -116,7 +116,10 @@ OU and policy-type checks.
 **Only direct attachments are reported.** A level with no entry has nothing
 attached *there*; it can still inherit a policy from an ancestor. The map
 covers every policy type enabled on the organization root, and names SCPs and
-RCPs explicitly when they are not enabled at all.
+RCPs explicitly when they are not enabled at all. A policy type the root
+reports as `PENDING_ENABLE` or `PENDING_DISABLE` is changing state, so it is
+reported as such, neither enabled nor absent, and its attachments are not
+mapped until it settles.
 
 Attachments are found by listing the organization's policies and then asking
 where each one is attached, rather than asking every OU and account what it
@@ -135,8 +138,11 @@ Suspended accounts are listed with their status rather than omitted, so the map
 matches what the Organizations console shows. If a policy lookup is throttled
 or denied, or a policy type the root reports as enabled turns out not to be
 listable, the report says attachments may be incomplete instead of showing an
-empty list. Where the OU walk stops short of the nesting limit, the OU it
-stopped at says so.
+empty list. Where an OU has child OUs beyond the five-level nesting limit, the
+walk stops at that OU and says so. Where listing an OU's accounts or child OUs
+fails, that OU carries the error. Either way, the report and the CSV warn above
+the map that its totals are lower bounds and name the affected OUs, and the
+console prints how many OUs could not be fully listed.
 
 ### Check result statuses
 
@@ -521,14 +527,14 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 
-# Run tests (322 tests)
+# Run tests (329 tests)
 python -m pytest tests/unit/ -v
 
 # Run with coverage
 python -m pytest tests/unit/ --cov=src --cov-report=term-missing
 ```
 
-The current suite contains 322 tests and reports 98% statement coverage.
+The current suite contains 329 tests and reports 98% statement coverage.
 
 ### Report UI
 
@@ -611,7 +617,7 @@ sample-wa-foundations-assessment/
 ├── report-ui/                   # Cloudscape React source for the HTML report
 ├── scripts/                     # Sample report generator
 ├── sample-reports/              # Generated sample report, checks, and org map
-├── tests/unit/                  # 322 pytest tests, 98% coverage
+├── tests/unit/                  # 329 pytest tests, 98% coverage
 ├── deployment/
 │   └── wafa-stack.yaml          # CloudFormation template
 ├── deploy.sh                    # Deployment script

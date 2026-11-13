@@ -1486,15 +1486,31 @@ class TestPrintOrgMapSummary:
     def test_reports_policy_lookup_errors(self, capsys):
         data = _summary_map(
             policyLookupErrors=[
-                {"scope": "INSPECTOR_POLICY", "error": "TooManyRequestsException"}
+                {
+                    "scope": "INSPECTOR_POLICY: ScanAll",
+                    "policyType": "INSPECTOR_POLICY",
+                    "policyName": "ScanAll",
+                    "error": "TooManyRequestsException",
+                }
             ]
         )
-        out = capsys.readouterr().out
         _print_summary(data)
         out = capsys.readouterr().out
-        assert "may be incomplete" in out
-        assert "INSPECTOR_POLICY" in out
+        assert "may be incomplete for Inspector: ScanAll" in out
+        # The same label as the policy badges, never the API constant.
+        assert "INSPECTOR_POLICY" not in out
         assert "TooManyRequestsException" in out
+
+    def test_reports_pending_policy_types(self, capsys):
+        data = _summary_map(
+            policyTypesPending=[
+                {"type": "SERVICE_CONTROL_POLICY", "status": "PENDING_ENABLE"}
+            ]
+        )
+        _print_summary(data)
+        out = capsys.readouterr().out
+        assert "SCP is changing state (PENDING_ENABLE)" in out
+        assert "attachments are not mapped" in out
 
     def test_reports_a_denied_account_listing(self, capsys):
         """Without this the totals read as a complete, smaller organization."""
@@ -1529,6 +1545,15 @@ class TestPrintOrgMapSummary:
 
         assert "Map is INCOMPLETE: 2 node(s)" in out
         assert "lower bounds" in out
+
+    def test_counts_a_node_in_both_lists_once(self, capsys):
+        """A node whose listing failed and whose walk stopped is one node."""
+        data = _summary_map(
+            nodeListingErrorPaths=["Root/A/B/C/D/Deep"],
+            depthTruncatedPaths=["Root/A/B/C/D/Deep"],
+        )
+        _print_summary(data)
+        assert "Map is INCOMPLETE: 1 node(s)" in capsys.readouterr().out
 
     def test_a_complete_map_is_not_called_incomplete(self, capsys):
         _print_summary(_summary_map())

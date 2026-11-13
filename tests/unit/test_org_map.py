@@ -610,6 +610,30 @@ class TestPolicyAttachment:
             "RESOURCE_CONTROL_POLICY",
         ]
 
+    @pytest.mark.parametrize("status", ["PENDING_ENABLE", "PENDING_DISABLE"])
+    def test_pending_guardrail_type_is_reported_as_pending(self, status):
+        """A type mid-transition is neither enabled nor confirmed absent."""
+        fake = sample_org(
+            policy_types=(
+                ("SERVICE_CONTROL_POLICY", status),
+                ("RESOURCE_CONTROL_POLICY", "ENABLED"),
+            )
+        )
+        data, error = run_map(fake)
+
+        assert error is None
+        assert data["policyTypesPending"] == [
+            {"type": "SERVICE_CONTROL_POLICY", "status": status}
+        ]
+        # Not reported as "not enabled", which would state an absence as fact.
+        assert data["policyTypesNotEnabled"] == []
+        assert "SERVICE_CONTROL_POLICY" not in data["enabledPolicyTypes"]
+        assert "SERVICE_CONTROL_POLICY" not in fake.list_policies_calls
+
+    def test_no_pending_policy_types_on_a_settled_root(self):
+        data, _ = run_map(sample_org())
+        assert data["policyTypesPending"] == []
+
     def test_skips_policy_lookups_when_no_type_is_enabled(self):
         fake = sample_org(policy_types=())
         data, error = run_map(fake)
@@ -698,6 +722,8 @@ class TestPolicyLookupFailures:
             "SERVICE_CONTROL_POLICY"
         ]
         assert "AccessDeniedException" in data["policyLookupErrors"][0]["error"]
+        assert data["policyLookupErrors"][0]["policyType"] == "SERVICE_CONTROL_POLICY"
+        assert "policyName" not in data["policyLookupErrors"][0]
         # Policies of the readable type are still attached.
         assert [p["name"] for p in find_node(data["root"], "ou-prod")["policies"]] == [
             "DataPerimeter"
@@ -714,6 +740,9 @@ class TestPolicyLookupFailures:
             "SERVICE_CONTROL_POLICY: DenyRootUser"
         ]
         assert "TooManyRequests" in data["policyLookupErrors"][0]["error"]
+        # Structured fields let every display render the badge label.
+        assert data["policyLookupErrors"][0]["policyType"] == "SERVICE_CONTROL_POLICY"
+        assert data["policyLookupErrors"][0]["policyName"] == "DenyRootUser"
         # Other policies still landed.
         assert [p["name"] for p in data["root"]["policies"]] == ["FullAWSAccess"]
         assert find_account(data["root"], "444444444444")["policies"] == []

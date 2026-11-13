@@ -12,7 +12,11 @@ messages in either file.
 import csv
 import io
 
-from src.report.policy_labels import policy_type_label
+from src.report.policy_labels import (
+    lookup_error_scope,
+    pending_policy_type_warning,
+    policy_type_label,
+)
 
 # A spreadsheet treats a cell starting with any of these as a formula, so a
 # value such as "=cmd|' /c calc'!A0" taken from an AWS resource name would
@@ -143,8 +147,9 @@ def _other_policy_names(policies):
 def _map_level_warnings(org_map):
     """Warnings a reader must see before trusting the map as a whole (FR-12.3).
 
-    A policy lookup fails per policy type or per policy, so it has no row of
-    its own and the message belongs here.
+    A policy lookup fails per policy type or per policy, and a policy type
+    can be mid-transition on the root, so neither has a row of its own and
+    the message belongs here.
 
     A failed node listing and a walk stopped at the nesting limit do have a
     row. Those are summarized here as a count and the affected paths, and the
@@ -153,10 +158,14 @@ def _map_level_warnings(org_map):
     condition is spelled out twice.
     """
     warnings = [
-        f"Attached policies may be incomplete for {failure.get('scope', '')}: "
+        f"Attached policies may be incomplete for {lookup_error_scope(failure)}: "
         f"{failure.get('error', '')}"
         for failure in org_map.get("policyLookupErrors") or []
     ]
+    warnings.extend(
+        pending_policy_type_warning(pending)
+        for pending in org_map.get("policyTypesPending") or []
+    )
     listing_errors = org_map.get("nodeListingErrorPaths") or []
     if listing_errors:
         warnings.append(

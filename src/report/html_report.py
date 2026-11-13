@@ -21,7 +21,12 @@ from pathlib import Path
 from jinja2 import BaseLoader, select_autoescape
 from jinja2.sandbox import SandboxedEnvironment
 
-from src.report.policy_labels import labelled_policies, policy_type_label
+from src.report.policy_labels import (
+    labelled_policies,
+    lookup_error_scope,
+    pending_policy_type_warning,
+    policy_type_label,
+)
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 
@@ -156,7 +161,15 @@ def _org_map_summary(org_map):
     return {
         "organizationId": org_map.get("organizationId", ""),
         "totals": org_map.get("totals") or {},
-        "policyLookupErrors": org_map.get("policyLookupErrors") or [],
+        # Scopes are labelled here so the alert matches the policy badges.
+        "policyLookupErrors": [
+            {"scope": lookup_error_scope(failure), "error": failure.get("error", "")}
+            for failure in org_map.get("policyLookupErrors") or []
+        ],
+        "policyTypesPendingWarnings": [
+            pending_policy_type_warning(pending)
+            for pending in org_map.get("policyTypesPending") or []
+        ],
         "depthTruncatedPaths": org_map.get("depthTruncatedPaths") or [],
         "nodeListingErrorPaths": org_map.get("nodeListingErrorPaths") or [],
     }
