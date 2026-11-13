@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useCollection } from "@cloudscape-design/collection-hooks";
 import Alert from "@cloudscape-design/components/alert";
 import AppLayout from "@cloudscape-design/components/app-layout";
+import Badge from "@cloudscape-design/components/badge";
 import BarChart from "@cloudscape-design/components/bar-chart";
 import Box from "@cloudscape-design/components/box";
 import ColumnLayout from "@cloudscape-design/components/column-layout";
@@ -118,6 +119,9 @@ function sectionsFor(data) {
     { id: "capabilities", text: "Capability Coverage" },
     { id: "checks", text: "Check Results" },
   ];
+  if (data.organization_map_summary || data.organization_map_error) {
+    sections.push({ id: "org-map", text: "Organization Map" });
+  }
   if (
     data.delegated_administrators.length ||
     data.delegated_administrators_error
@@ -574,6 +578,209 @@ function DelegatedAdmins({ admins, error }) {
   );
 }
 
+// FR-12: Organization map. Rows and policy labels arrive finished in the
+// report payload from src/checks/org_map.py and src/report/policy_labels.py,
+// so this component renders data rather than re-deriving it. Only the badge
+// colour, which is pure presentation, is decided here.
+const POLICY_BADGE_COLOR = {
+  SERVICE_CONTROL_POLICY: "blue",
+  RESOURCE_CONTROL_POLICY: "green",
+};
+
+const ORG_ROW_TYPE_LABELS = { root: "Root", ou: "OU", account: "Account" };
+
+function OrganizationMap({ map, rows, notEnabled, error }) {
+  const totals = (map && map.totals) || {};
+  const policyErrors = (map && map.policyLookupErrors) || [];
+  const truncatedPaths = (map && map.depthTruncatedPaths) || [];
+  const listingErrorPaths = (map && map.nodeListingErrorPaths) || [];
+  const pendingWarnings = (map && map.policyTypesPendingWarnings) || [];
+  // Paged and filtered, because a large organization renders thousands of
+  // rows otherwise. Not sorted: the row order is the hierarchy. Each row shows
+  // its OU path, so a row stays locatable when its ancestors are on another
+  // page or filtered out.
+  const { items, collectionProps, filterProps, filteredItemsCount, paginationProps } =
+    useCollection(rows, {
+      filtering: {
+        fields: ["name", "id", "path", "status"],
+        empty: <Box textAlign="center">No organization structure to show.</Box>,
+        noMatch: <Box textAlign="center">No OUs or accounts match the filter.</Box>,
+      },
+      pagination: { pageSize: 50 },
+    });
+
+  return (
+    <SpaceBetween size="m">
+      {error && (
+        <Alert type="warning" header="Organization map could not be built">
+          {error}
+        </Alert>
+      )}
+      {map && (
+        <Container
+          header={
+            <Header
+              variant="h2"
+              counter={`(${totals.organizationalUnits || 0} OUs, ${
+                totals.accounts || 0
+              } accounts)`}
+              description="Policy columns list only policies attached directly at that level. Accounts and OUs also inherit policies from their parents."
+            >
+              Organization Map
+            </Header>
+          }
+        >
+          <SpaceBetween size="l">
+            <KeyValuePairs
+              columns={4}
+              items={[
+                { label: "Organization ID", value: map.organizationId || "—" },
+                {
+                  label: "Organizational units",
+                  value: totals.organizationalUnits || 0,
+                },
+                { label: "Accounts", value: totals.accounts || 0 },
+                { label: "Deepest OU nesting", value: totals.maxDepth || 0 },
+              ]}
+            />
+            {notEnabled.length > 0 && (
+              <Alert type="info" header="Guardrail policy types not enabled">
+                {notEnabled.join(" and ")}{" "}
+                {notEnabled.length > 1 ? "are" : "is"} not enabled in this
+                organization, so no policies of{" "}
+                {notEnabled.length > 1 ? "those types" : "that type"} can be
+                attached at any level.
+              </Alert>
+            )}
+            {listingErrorPaths.length > 0 && (
+              <Alert type="warning" header="Some OUs could not be fully listed">
+                The counts above are lower bounds. Listing the accounts or child
+                OUs of {listingErrorPaths.join(", ")} failed, so this
+                organization may be larger than shown. Those rows carry the
+                reason in the table.
+              </Alert>
+            )}
+            {truncatedPaths.length > 0 && (
+              <Alert type="warning" header="OU hierarchy not fully walked">
+                The hierarchy is nested deeper than the levels this map walks.
+                The walk stopped below {truncatedPaths.join(", ")}, so some OUs
+                and accounts are not listed. Those rows carry the same warning
+                in the table.
+              </Alert>
+            )}
+            {pendingWarnings.length > 0 && (
+              <Alert type="warning" header="Policy types changing state">
+                <SpaceBetween size="xxs">
+                  {pendingWarnings.map((warning) => (
+                    <Box key={warning}>{warning}</Box>
+                  ))}
+                </SpaceBetween>
+              </Alert>
+            )}
+            {policyErrors.length > 0 && (
+              <Alert
+                type="warning"
+                header="Attached policies may be incomplete"
+              >
+                <SpaceBetween size="xxs">
+                  {policyErrors.map((failure) => (
+                    <Box key={failure.scope}>
+                      {failure.scope}: {failure.error}
+                    </Box>
+                  ))}
+                </SpaceBetween>
+              </Alert>
+            )}
+            <Table
+              {...collectionProps}
+              variant="embedded"
+              ariaLabels={{ tableLabel: "Organization structure" }}
+              items={items}
+              wrapLines
+              trackBy="key"
+              filter={
+                <TextFilter
+                  {...filterProps}
+                  filteringPlaceholder="Find an OU or account"
+                  filteringAriaLabel="Filter organization structure"
+                  countText={`${filteredItemsCount} ${filteredItemsCount === 1 ? "match" : "matches"}`}
+                />
+              }
+              pagination={<Pagination {...paginationProps} />}
+              columnDefinitions={[
+                {
+                  id: "structure",
+                  header: "Structure",
+                  isRowHeader: true,
+                  cell: (row) => (
+                    <div style={{ marginLeft: row.depth * 18 }}>
+                      <SpaceBetween size="xxs">
+                        <Box variant={row.kind === "account" ? "span" : "strong"}>
+                          {row.name || "(unnamed)"}
+                        </Box>
+                        {row.path !== row.name && (
+                          <Box color="text-body-secondary" fontSize="body-s">
+                            {row.path}
+                          </Box>
+                        )}
+                        {row.note && (
+                          <StatusIndicator type="warning">{row.note}</StatusIndicator>
+                        )}
+                      </SpaceBetween>
+                    </div>
+                  ),
+                },
+                {
+                  id: "type",
+                  header: "Type",
+                  width: 110,
+                  cell: (row) => ORG_ROW_TYPE_LABELS[row.kind] || row.kind,
+                },
+                { id: "id", header: "ID", cell: (row) => row.id || "—" },
+                {
+                  id: "status",
+                  header: "Status",
+                  cell: (row) => {
+                    if (row.kind !== "account") {
+                      return "—";
+                    }
+                    return row.status === "ACTIVE" ? (
+                      <StatusIndicator type="success">Active</StatusIndicator>
+                    ) : (
+                      <StatusIndicator type="warning">
+                        {row.status || "Unknown"}
+                      </StatusIndicator>
+                    );
+                  },
+                },
+                {
+                  id: "policies",
+                  header: "Directly attached policies",
+                  cell: (row) =>
+                    row.policies.length ? (
+                      <SpaceBetween size="xxs" direction="horizontal">
+                        {row.policies.map((policy) => (
+                          <Badge
+                            key={`${policy.type}:${policy.id}`}
+                            color={POLICY_BADGE_COLOR[policy.type] || "grey"}
+                          >
+                            {policy.typeLabel}: {policy.name}
+                          </Badge>
+                        ))}
+                      </SpaceBetween>
+                    ) : (
+                      "—"
+                    ),
+                },
+              ]}
+            />
+          </SpaceBetween>
+        </Container>
+      )}
+    </SpaceBetween>
+  );
+}
+
 function Methodology({ model }) {
   return (
     <Container header={<Header variant="h2">Maturity Methodology</Header>}>
@@ -708,6 +915,16 @@ export default function App({ data }) {
               <Section id="checks">
                 <CheckResults checks={data.checks} summary={data.summary} />
               </Section>
+              {(data.organization_map_summary || data.organization_map_error) && (
+                <Section id="org-map">
+                  <OrganizationMap
+                    map={data.organization_map_summary}
+                    rows={data.organization_map_rows || []}
+                    notEnabled={data.organization_map_not_enabled_labels || []}
+                    error={data.organization_map_error}
+                  />
+                </Section>
+              )}
               {(data.delegated_administrators.length > 0 ||
                 data.delegated_administrators_error) && (
                 <Section id="delegated-admins">

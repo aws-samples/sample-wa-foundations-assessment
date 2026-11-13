@@ -1,0 +1,9 @@
+Type,OU Path,Name,ID,Status,Depth,Directly Attached SCPs,Directly Attached RCPs,Other Directly Attached Policies,Error
+Root,Root,Root,r-root,,0,FullAWSAccess,,,
+Account,Root,Management,111111111111,ACTIVE,1,,,,
+OU,Root/Security,Security,ou-sec,,1,DenyRootUserActions,,,
+Account,Root/Security,Audit,333333333333,ACTIVE,2,,,,
+Account,Root/Security,Log Archive,222222222222,ACTIVE,2,,,,
+OU,Root/Workloads,Workloads,ou-wl,,1,,,,
+OU,Root/Workloads/Production,Production,ou-prod,,2,,,Tag: RequireCostCenterTag,
+Account,Root/Workloads/Production,Workload-Prod,444444444444,ACTIVE,3,DenyRootUserActions,,,

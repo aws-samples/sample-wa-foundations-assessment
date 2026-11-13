@@ -526,5 +526,122 @@
       ]
     }
   ],
-  "delegated_administrators_error": null
+  "delegated_administrators_error": null,
+  "organization_map": {
+    "organizationId": "o-example12345",
+    "managementAccountId": "111111111111",
+    "root": {
+      "id": "r-root",
+      "name": "Root",
+      "type": "ROOT",
+      "path": "Root",
+      "depth": 0,
+      "policies": [
+        {
+          "id": "p-FullAWSAccess",
+          "name": "FullAWSAccess",
+          "type": "SERVICE_CONTROL_POLICY",
+          "awsManaged": true
+        }
+      ],
+      "accounts": [
+        {
+          "id": "111111111111",
+          "name": "Management",
+          "status": "ACTIVE",
+          "policies": []
+        }
+      ],
+      "children": [
+        {
+          "id": "ou-sec",
+          "name": "Security",
+          "type": "ORGANIZATIONAL_UNIT",
+          "path": "Root/Security",
+          "depth": 1,
+          "policies": [
+            {
+              "id": "p-example-denyroot",
+              "name": "DenyRootUserActions",
+              "type": "SERVICE_CONTROL_POLICY",
+              "awsManaged": false
+            }
+          ],
+          "accounts": [
+            {
+              "id": "333333333333",
+              "name": "Audit",
+              "status": "ACTIVE",
+              "policies": []
+            },
+            {
+              "id": "222222222222",
+              "name": "Log Archive",
+              "status": "ACTIVE",
+              "policies": []
+            }
+          ],
+          "children": []
+        },
+        {
+          "id": "ou-wl",
+          "name": "Workloads",
+          "type": "ORGANIZATIONAL_UNIT",
+          "path": "Root/Workloads",
+          "depth": 1,
+          "policies": [],
+          "accounts": [],
+          "children": [
+            {
+              "id": "ou-prod",
+              "name": "Production",
+              "type": "ORGANIZATIONAL_UNIT",
+              "path": "Root/Workloads/Production",
+              "depth": 2,
+              "policies": [
+                {
+                  "id": "p-example-tags",
+                  "name": "RequireCostCenterTag",
+                  "type": "TAG_POLICY",
+                  "awsManaged": false
+                }
+              ],
+              "accounts": [
+                {
+                  "id": "444444444444",
+                  "name": "Workload-Prod",
+                  "status": "ACTIVE",
+                  "policies": [
+                    {
+                      "id": "p-example-denyroot",
+                      "name": "DenyRootUserActions",
+                      "type": "SERVICE_CONTROL_POLICY",
+                      "awsManaged": false
+                    }
+                  ]
+                }
+              ],
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    "enabledPolicyTypes": [
+      "BACKUP_POLICY",
+      "SERVICE_CONTROL_POLICY",
+      "TAG_POLICY"
+    ],
+    "policyTypesNotEnabled": [
+      "RESOURCE_CONTROL_POLICY"
+    ],
+    "policyTypesPending": [],
+    "policyLookupErrors": [],
+    "totals": {
+      "organizationalUnits": 3,
+      "accounts": 4,
+      "maxDepth": 2
+    }
+  },
+  "organization_map_error": null
 }

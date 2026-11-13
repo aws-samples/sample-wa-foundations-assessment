@@ -9,6 +9,8 @@ import re
 import boto3
 from botocore.exceptions import ClientError
 
+from src.checks import org_api
+
 
 def _normalize_name(name):
     """Normalize an account or OU name for matching.
@@ -50,9 +52,8 @@ def check_org_exists():
     }
     try:
         client = boto3.client("organizations")
-        resp = client.describe_organization()
-        org_exists = "Organization" in resp and "Id" in resp["Organization"]
-        result["status"] = "complete" if org_exists else "incomplete"
+        organization = org_api.describe_organization(client)
+        result["status"] = "complete" if organization.get("Id") else "incomplete"
         return result
     except ClientError as e:
         # A standalone account legitimately has no organization — that is an
@@ -178,10 +179,13 @@ def check_audit_account():
 
 
 def _get_policy_types():
-    """Helper: get policy types from organization root."""
+    """Helper: get policy types from organization root.
+
+    Four checks ask for this and three more ask for the root's id. The root is
+    read once per run through ``org_api`` rather than once per check.
+    """
     client = boto3.client("organizations")
-    resp = client.list_roots()
-    roots = resp.get("Roots", [])
+    roots = org_api.list_roots(client)
     if not roots:
         return []
     return roots[0].get("PolicyTypes", [])
@@ -311,17 +315,11 @@ def check_rcp_enabled():
 def _get_top_level_ous():
     """Helper: get top-level OUs under the root."""
     client = boto3.client("organizations")
-    roots_resp = client.list_roots()
-    roots = roots_resp.get("Roots", [])
+    roots = org_api.list_roots(client)
     if not roots:
         return []
 
-    root_id = roots[0]["Id"]
-    ous = []
-    paginator = client.get_paginator("list_organizational_units_for_parent")
-    for page in paginator.paginate(ParentId=root_id):
-        ous.extend(page.get("OrganizationalUnits", []))
-    return ous
+    return org_api.list_child_ous(client, roots[0]["Id"])
 
 
 def check_security_ou():

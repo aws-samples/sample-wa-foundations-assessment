@@ -361,6 +361,134 @@ Based on the AWS Well-Architected Foundations maturity model (March 2026). Maps 
   | 4 | Advanced | Organization service integrations, preventive and detective controls, and management-account hygiene checks are complete. |
   | 5 | Expert | Every check returned by the current Well-Architected Foundations Assessment report is complete. |
 
+### FR-12: Organization and OU Account Map
+**Prerequisite:** Only run if management account. These are INFORMATIONAL only (no pass/fail check generated),
+so FR-12 never contributes to FR-11 maturity scoring or to the capability axes. The OU and policy-type
+*checks* in FR-3.6–FR-3.12 remain the scored view of the same services.
+- FR-12.1: Walk the OU hierarchy from `organizations.listRoots()`, using
+  `organizations.listOrganizationalUnitsForParent()` (paginate fully). Bound the walk at
+  5 levels below the root, which is the AWS Organizations nesting limit.
+  - Walk one level at a time, submitting both calls for every node on that level to the same bounded
+    `ThreadPoolExecutor` used by FR-12.3 before reading any result, and consume the results in level order
+    so the tree, the totals, and the per-node warnings stay deterministic. The call count is unchanged at
+    two per OU; only the latency improves, and the pool stays small because Organizations throttles hard.
+  - Record `childrenTruncated` on the node where the walk stopped, naming how many child OUs were not
+    listed, so the gap is locatable. Flag truncation only when children actually exist past the limit: an
+    OU sitting exactly at the limit with no children is not truncation.
+  - Summarize the same condition at map level as `depthTruncated` with `depthTruncatedPaths` naming those
+    nodes (see FR-12.6).
+  - Build each node's `path` by joining names with `/`, escaping `\` and then `/` inside a name. AWS
+    permits `/` in an OU name, so an OU literally named `Prod/EU` would otherwise produce the same path as
+    an OU `EU` nested inside an OU `Prod`. Escaping the backslash first keeps the escaping reversible.
+- FR-12.2: For each root and OU, call `organizations.listAccountsForParent()` (paginate fully) to record
+  account placement. Include suspended accounts with their `status`; do not drop them. Record the account
+  `id`, `name`, and `status` only — never the account email address, which is personal data not needed to
+  place an account.
+  - A failed account or child-OU listing is recorded on that node as `accountsError` or `childrenError`,
+    and at map level as `nodeListingErrors` with `nodeListingErrorPaths` naming those nodes (see FR-12.6).
+    The totals count what was read, so without the map-level field a partial map reads as a complete,
+    smaller organization.
+- FR-12.3: Collect policy attachments by enumerating policies, not by interrogating targets. For each policy
+  type that is `ENABLED` on the root, call `organizations.listPolicies()` (paginate fully); then for each
+  policy returned, call `organizations.listTargetsForPolicy()` (paginate fully) and attach it to the matching
+  root, OU, or account, recording policy `id`, `name`, `type`, and `awsManaged`.
+  - Both this and the per-target alternative report only **directly attached** policies, never inherited
+    ones. An empty list means nothing is attached at that level, not that no policy applies.
+  - Treat `enabled policy types + policies` as a **floor on the attachment lookups, not a total**.
+    `listTargetsForPolicy` pages, so a policy attached to every target, as `FullAWSAccess` usually is,
+    pages across all of them and its own lookup still scales with the organization. The FR-12.1 walk is
+    also unchanged at two calls per OU, so on a large organization most of the calls are the walk rather
+    than the policy lookups. What the inversion buys is that the attachment lookups stop growing with the
+    number of OUs: interrogating each target instead costs `targets x enabled policy types`, which grows
+    with the size of the organization and throttles on large ones. Account-level attachments arrive in the
+    same responses, so they are always included and need no opt-in flag.
+  - Only types enabled on the root are queried, so `PolicyTypeNotEnabledException` is expected not to
+    occur. If `listPolicies` raises it or `UnsupportedAPIEndpointException` anyway, that is a disagreement
+    between two AWS answers, not a confirmed absence: record it in `policyLookupErrors` naming the
+    contradiction. Skipping it would show the type as enabled with no attachment anywhere, which is
+    indistinguishable from "enabled but genuinely unused".
+  - Use a bounded `ThreadPoolExecutor`, creating the client in the calling thread (see NFR-2.2), and await
+    every lookup so one failure cannot hide another policy's attachments.
+  - Record every lookup failure through one handler that selects the message by error code, so no later
+    branch can swallow a failure instead of reporting it.
+  - Configure the Organizations client with **adaptive** retries. Organizations enforces a low request rate
+    and standard mode has no client-side rate limiting, so a burst of concurrent reads exhausts its attempts
+    and silently loses attachments.
+  - Any other failure is recorded in `policyLookupErrors` as `{scope, policyType, policyName?, error}`,
+    where `scope` is the raw policy type (when listing policies failed) or `"<type>: <name>"` (when listing
+    one policy's targets failed), and `policyName` is present only in the second case. An error means
+    attachments may be incomplete and must be surfaced rather than rendered as an empty list. Every display
+    renders the scope from `policyType` and `policyName` with the same label as the policy badges (FR-12.5).
+  - Report `policyTypesNotEnabled` for SERVICE_CONTROL_POLICY and RESOURCE_CONTROL_POLICY so the map states
+    plainly when a guardrail type is not in use at all. A type the root reports as `PENDING_ENABLE` or
+    `PENDING_DISABLE` is mid-transition, neither enabled nor confirmed absent: do not query it, do not list it
+    in `policyTypesNotEnabled`, and record it in `policyTypesPending` as `{type, status}` so every output warns
+    that its attachments are not mapped (see FR-12.6).
+- FR-12.4: Generate `wafa-org-map.csv` with one row per root, OU, and account, separating directly attached
+  SCPs, RCPs, and other policy types into their own columns. Keep it separate from `wafa-checks.csv`, which
+  stays one row per check. Escape cells that begin with `=`, `+`, `-`, `@`, tab, or CR so AWS-provided
+  names and error messages cannot execute as spreadsheet formulas.
+  - Write `wafa-org-map.csv` on every run, in every account mode. Without a map (a limited-mode run, an
+    undetermined account type, or a map that could not be built) it holds the header plus one row whose
+    Type is `Not available` and whose Error cell states the reason. Reports go to fixed file names in one
+    directory or S3 prefix per account, so skipping the file would leave an earlier run's map beside this
+    run's reports, where it reads as the current result.
+  - The root row's Error cell carries every reason the map may be incomplete, so a reader who opens only
+    the spreadsheet cannot mistake a partial map for a complete one: the `policyLookupErrors` messages,
+    which belong to no row, plus a count and the affected paths for the conditions that do (see FR-12.6).
+    It never displaces that row's own note.
+  - Escape cells so AWS-provided text cannot execute as a spreadsheet formula: prefix with an apostrophe
+    when the value begins with a tab, CR, or LF, or when it begins with `=`, `+`, `-`, or `@` after leading
+    whitespace is ignored. A value that is a plain number is left alone, so a signed number still matches
+    the same value in `wafa-raw.json`. This applies to `wafa-checks.csv` as well, whose `Error` column
+    carries AWS API messages.
+- FR-12.5: Display as a separate "Organization Map" section in the HTML report, below the check results,
+  with an indented structure table, account placement, status, and attached-policy badges. Print a one-line
+  console summary of OU, account, and attachment counts.
+  - Page and filter the structure table, and show each row's OU path, because paging or filtering separates
+    a row from the ancestors its indentation refers to. Do not sort it: the row order is the hierarchy.
+  - Render display labels, not API constants, for policy types in every output including the console.
+  - `wafa-raw.json` carries the complete map as `organization_map`, plus `organization_map_error` when it
+    could not be built. The HTML report data carries `organization_map_rows` (rows flattened in Python with
+    finished policy labels and a row key that leads with the row's position, because an AWS id defaults to
+    an empty string and two rows missing an id would otherwise share a key) and
+    `organization_map_summary`, which holds only the map-level fields the UI reads: `organizationId`,
+    `totals`, `policyLookupErrors` (with labelled scopes), `policyTypesPendingWarnings`,
+    `depthTruncatedPaths`, and `nodeListingErrorPaths`. The HTML must not
+    embed the tree as well, which would roughly double the inline JSON for data the UI never reads.
+  - Flatten the tree once per run and pass the same rows to the console, the CSV, and the HTML report, so
+    the three cannot disagree.
+  - A per-node failure is recorded on that node as `accountsError` or `childrenError` and keeps the rest of
+    the map, mirroring FR-9's partial-result behavior. Policy lookup failures are organization-wide rather
+    than per-node and are reported through `policyLookupErrors`.
+  - The console states how many distinct nodes could not be fully listed before printing the individual warnings,
+    then prints every map-level and per-node warning, each naming its node, capped with a count of the
+    withheld lines. A throttled large organization can produce a warning per node, which would otherwise
+    push the check results off-screen; the HTML report and the CSV carry them all.
+  - NOT scored — informational reference only.
+- FR-12.6: Every reason the map may be incomplete must be visible without reading the whole map. Each is
+  recorded twice, with a different job in each place, and never as the same sentence twice:
+  - On the node it affects (`accountsError`, `childrenError`, `childrenTruncated`), which explains what
+    happened, and in the CSV and the report table is the row's own Error cell or note.
+  - At map level, as a boolean plus the affected paths (`nodeListingErrors` / `nodeListingErrorPaths`,
+    `depthTruncated` / `depthTruncatedPaths`), which states that the totals are lower bounds and locates
+    the affected nodes. The report renders an Alert above the table, the CSV writes it to the root row, and
+    the console prints the count. A per-row note alone is not sufficient: the row may be filtered out or on
+    a later page of a paged table.
+  - `policyLookupErrors` and `policyTypesPending` have no row of their own, so their messages appear at map
+    level only.
+- FR-12.7: Reads that every organization check shares — `DescribeOrganization` and `ListRoots` — are
+  resolved once per run through `src/checks/org_api.py` rather than once per check. Cache successful
+  responses only, so one denied or throttled read does not become an error for every later check, and
+  clear the cache at the start of a run. The pagination helpers live there too, so no scored check depends
+  on an informational module for them.
+- Output: `{organizationId, managementAccountId, root, enabledPolicyTypes, policyTypesNotEnabled,
+  policyLookupErrors, totals: {organizationalUnits, accounts, maxDepth}, depthTruncated?,
+  depthTruncatedPaths?, nodeListingErrors?, nodeListingErrorPaths?}`, where each node is
+  `{id, name, type, path, depth, policies: [...], accounts: [...], children: [...]}` plus
+  `accountsError?`, `childrenError?`, and `childrenTruncated?`, and each account is
+  `{id, name, status, policies: [...]}`.
+
 ## Non-Functional Requirements
 
 ### NFR-1: Security
@@ -594,6 +722,9 @@ organizations:ListAWSServiceAccessForOrganization
 organizations:ListRoots
 organizations:ListAccounts
 organizations:ListOrganizationalUnitsForParent
+organizations:ListAccountsForParent
+organizations:ListPolicies
+organizations:ListTargetsForPolicy
 organizations:ListDelegatedAdministrators
 organizations:ListDelegatedServicesForAccount
 controltower:ListLandingZones

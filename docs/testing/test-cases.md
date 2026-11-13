@@ -94,8 +94,10 @@ Owner: ____
 ### A1. Fresh deploy in us-east-1 (baseline happy path)
 - **Precondition:** Management account, no existing assessment source bucket.
 - **Steps:** `./deploy.sh --profile <mgmt> --region us-east-1`
-- **Expected:** Stack creates; CodeBuild `SUCCEEDED`; three files land in
-  `s3://<results-bucket>/<account-id>/` (wafa-report.html, wafa-checks.csv, wafa-raw.json).
+- **Expected:** Stack creates; CodeBuild `SUCCEEDED`; four files land in
+  `s3://<results-bucket>/<account-id>/` (wafa-report.html, wafa-checks.csv,
+  wafa-raw.json, wafa-org-map.csv). A member or standalone run also writes
+  the map CSV, holding only a `Not available` row with the reason.
 
 ### A2. Fresh deploy in a non-us-east-1 region (validates the s3 mb flag fix)
 - **Precondition:** Clean account (no prior assessment source bucket), OR fully
@@ -184,7 +186,9 @@ Owner: ____
 
 ### B1. run-local.sh from CloudShell in the management account
 - **Steps:** clone repo, `./run-local.sh`
-- **Expected:** Deps install; assessment runs; three report files written to the current dir.
+- **Expected:** Deps install; assessment runs; four report files written to the current
+  dir, including `wafa-org-map.csv`. From a member or standalone account the map CSV
+  holds only a `Not available` row with the reason.
 
 ### B2. Local run with explicit S3 output
 - **Steps:** `python -m src.main --output s3://<some-bucket>/wafa/`
@@ -335,6 +339,71 @@ For each, set up the "good" and "bad" state and confirm status flips correctly.
 ### E11. No IAM users (FR-6.2)
 - Zero IAM users → complete; ≥1 user → incomplete.
 
+### E12. Organization and OU account map (FR-12, informational)
+- Management account. **Expected:** the report's Organization Map section lists every OU
+  and shows each account under the OU that actually contains it. Compare against the
+  AWS Organizations console — the hierarchy and placement should match exactly.
+- Confirm the map changes **no** check result and **no** maturity level: run before and
+  after, and diff `wafa-checks.csv`. It must be identical.
+- Suspended accounts appear with their status rather than being omitted.
+- Account email addresses appear **nowhere** in any artifact (grep the outputs for `@`).
+- **Directly attached vs inherited:** attach an SCP to a parent OU only. **Expected:** it
+  is listed on the parent, and *not* repeated on child OUs or accounts. This is the most
+  commonly misread part of the output.
+- Member/standalone account. **Expected:** no Organization Map section (absent, not an
+  errored section), and `wafa-org-map.csv` holds only the header and a `Not available` row
+  saying the map runs only from the management account.
+- **No stale map (FR-12.4):** run from the management account, then run into the same
+  output directory or S3 prefix from a member account, or with Organizations reads denied.
+  **Expected:** `wafa-org-map.csv` is replaced by a `Not available` row giving the reason;
+  none of the first run's OUs, accounts, or policies remain.
+- **Deeply nested hierarchy (6+ levels):** the OU where the walk stopped shows the warning
+  on its own row, naming how many child OUs are not listed, and the section header warning
+  names that OU's path. The same condition must not be stated twice on one surface.
+- **Large hierarchy in the report:** the structure table pages rather than rendering every
+  row, each row shows its OU path so a row on page 2 is still locatable, and the filter
+  finds an account by name or ID. The table must not be sortable — the row order is the
+  hierarchy.
+- **A failed listing is visible without finding the row (FR-12.6):** deny
+  `ListAccountsForParent` for one OU, then check the report shows an Alert above the table
+  saying the counts are lower bounds and naming that OU, the CSV root row says the same,
+  and the console prints the count. Filter the table so the affected row is hidden and
+  confirm the Alert is still there — a row note alone is not sufficient.
+
+### E13. Policy type coverage in the map (FR-12.3)
+- With RCPs not enabled, confirm the section states "RCP is not enabled" rather
+  than silently showing nothing (and "SCP and RCP are not enabled" when both are off).
+- Immediately after enabling or disabling a policy type, while the root reports it as
+  `PENDING_ENABLE` or `PENDING_DISABLE`: **expected:** the type appears in
+  `policyTypesPending`, not in `policyTypesNotEnabled`, and the report, the CSV root row,
+  and the console all say it is changing state and its attachments are not mapped.
+- A policy lookup failure is labelled like the policy badges (for example
+  `Tag: RequireCostCenterTag`), never with the API constant, in the report, the CSV, and
+  the console.
+- Enable Tag or Backup policies and attach one. **Expected:** it appears under the
+  "Other Directly Attached Policies" CSV column and as a badge in the report.
+- Attach an SCP directly to an *account*. **Expected:** it appears on that account's row,
+  with no flag or extra option needed.
+- Large organization (hundreds of OUs): **expected:** completes without throttling, and
+  `policyLookupErrors` in `wafa-raw.json` is empty. Record timings and the call count.
+  Attachment lookups should not grow with the number of OUs, only with the number of
+  policies. The OU walk still costs two calls per OU, so it is the dominant call count on
+  a large organization; it runs a level at a time through the bounded pool, so compare the
+  wall-clock time against that call count rather than expecting it to be flat.
+- Throttle deliberately (many policies, or run concurrently with other Organizations
+  callers). **Expected:** the report warns "Attached policies may be incomplete" and names
+  the affected policy type or policy; it never shows an empty policy list as if nothing
+  were attached.
+- **Two AWS answers disagreeing:** if `ListPolicies` returns `PolicyTypeNotEnabledException`
+  or `UnsupportedAPIEndpointException` for a type the root reports as `ENABLED`, expect that
+  type in `policyLookupErrors` saying so. It must not be reported as an absence: the map
+  would then show the type as enabled with no attachment anywhere, which looks exactly like
+  a type that is enabled but unused. (Hard to force deliberately; check the handling in
+  `src/checks/org_map.py` and its unit test.)
+- **Console warning volume:** with many node or policy warnings, confirm the console prints
+  at most ten and states how many were withheld, and that the check results table is still
+  visible above the prompt. Every warning must still be in the HTML report and the CSV.
+
 ---
 
 ## Group F — Maturity scoring
@@ -390,9 +459,10 @@ Owner: ____
   column populated only for error checks.
 
 ### G6. Raw JSON schema
-- wafa-raw.json contains `account_info`, `maturity`, `checks[]`, `delegated_administrators[]`.
-  The HTML report data uses the same `delegated_administrators` and
-  `delegated_administrators_error` keys.
+- wafa-raw.json contains `account_info`, `maturity`, `checks[]`, `delegated_administrators[]`,
+  and `organization_map` (management account) or `null` (limited mode).
+  The HTML report data uses the same `delegated_administrators`,
+  `delegated_administrators_error`, `organization_map`, and `organization_map_error` keys.
   Every check has: check, description, status, required, weight, loe, remediationLink (+ error if error).
 
 ### G7. Special characters don't break the report
@@ -402,6 +472,27 @@ Owner: ____
 ### G8. Delegated admins table (management only)
 - With ≥1 delegated administrator, confirm the table lists account + services;
   with none, confirm the section handles empty gracefully.
+
+### G9. Organization map CSV (FR-12.4)
+- `wafa-org-map.csv` opens in a spreadsheet with 10 columns and one row per root,
+  OU, and account.
+- Confirm it agrees with the report's Organization Map table. The report shows one
+  badge column for all attached policies, while the CSV splits them into SCP, RCP,
+  and other columns — check the same policies appear, not the same layout.
+- An OU or account name containing a comma or quote round-trips correctly
+  (the csv module quotes it).
+- **Formula injection:** if any OU or account name begins with `=`, `+`, `-` or `@`,
+  confirm the cell is prefixed with an apostrophe and the spreadsheet shows it as
+  literal text rather than evaluating it.
+- **Partial maps are flagged (FR-12.6):** the root row's Error cell must say the map is
+  incomplete in every case — a denied or throttled policy lookup (full message, since it
+  belongs to no row), a failed account or child-OU listing, or a walk stopped at the
+  nesting limit (a count plus the affected paths). The affected row's own Error cell
+  carries the explanation. Check both: an incomplete map must never look complete to
+  someone reading only the first row, and the same sentence must not appear twice.
+- **Formula escaping is narrow and complete:** a name of `" =HYPERLINK(...)"` with a
+  leading space is still escaped, and a plain signed number such as `-1` is left alone so
+  it still matches `wafa-raw.json`.
 
 ---
 
@@ -424,6 +515,11 @@ Owner: ____
 - If listing one delegated administrator's services fails, **expected:** that
   administrator retains any services already found and has `servicesError`;
   later administrators still appear without a list-level error.
+- Deny `organizations:ListPolicies` or `organizations:ListTargetsForPolicy`. **Expected:**
+  the Organization Map still shows the hierarchy and account placement, with a warning that
+  attached policies may be incomplete; the assessment and maturity level are unaffected.
+- Deny `organizations:ListAccountsForParent`. **Expected:** affected OUs show an account
+  listing warning and sibling branches still list their accounts.
 
 ### H3. CodeBuild timeout boundary
 - Very large org / many regions. **Expected:** completes within the 10-min CodeBuild timeout,

@@ -11,6 +11,7 @@ The report contains:
 - Assessment overview
 - Check results table with filtering
 - Delegated administrators table
+- Organization and OU account map with attached policies (FR-12)
 - Light/dark mode toggle
 """
 
@@ -19,6 +20,13 @@ from pathlib import Path
 
 from jinja2 import BaseLoader, select_autoescape
 from jinja2.sandbox import SandboxedEnvironment
+
+from src.report.policy_labels import (
+    labelled_policies,
+    lookup_error_scope,
+    pending_policy_type_warning,
+    policy_type_label,
+)
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 
@@ -113,8 +121,69 @@ def _load_asset(name):
     return (ASSETS_DIR / name).read_text(encoding="utf-8")
 
 
+def _org_map_rows(rows):
+    """Return display rows for the organization map, with policy labels.
+
+    ``key`` is a stable row identity for the report table, so the UI does not
+    have to construct one. It leads with the row's position because an AWS id
+    defaults to an empty string: two rows that are both missing an id would
+    otherwise share a key, and the table would render duplicate or wrong rows
+    once it is filtered or paged. The order never changes — the table is not
+    sortable, and the rows are the hierarchy — so the position is stable.
+    """
+    return [
+        dict(
+            row,
+            key=f"{index}:{row.get('kind', '')}:{row.get('id', '')}",
+            policies=labelled_policies(row.get("policies")),
+        )
+        for index, row in enumerate(rows or [])
+    ]
+
+
+def _org_map_summary(org_map):
+    """Return only the map-level fields the report UI reads.
+
+    The complete tree stays in ``wafa-raw.json``. Embedding it here as well
+    roughly doubles the inline JSON for data the UI never reads: it renders the
+    flattened rows plus these few summary fields.
+
+    The two path lists carry every reason the map may be incomplete that is
+    attributable to a node: ``depthTruncatedPaths`` where the walk stopped,
+    and ``nodeListingErrorPaths`` where an account or child-OU listing failed.
+    An empty list means that did not happen. A non-empty one names the nodes,
+    so the section can warn above the table — the row's own note would
+    otherwise be the only sign, and it may be filtered out or on a later page
+    while the header totals read as a complete, smaller organization.
+    """
+    if not org_map:
+        return None
+    return {
+        "organizationId": org_map.get("organizationId", ""),
+        "totals": org_map.get("totals") or {},
+        # Scopes are labelled here so the alert matches the policy badges.
+        "policyLookupErrors": [
+            {"scope": lookup_error_scope(failure), "error": failure.get("error", "")}
+            for failure in org_map.get("policyLookupErrors") or []
+        ],
+        "policyTypesPendingWarnings": [
+            pending_policy_type_warning(pending)
+            for pending in org_map.get("policyTypesPending") or []
+        ],
+        "depthTruncatedPaths": org_map.get("depthTruncatedPaths") or [],
+        "nodeListingErrorPaths": org_map.get("nodeListingErrorPaths") or [],
+    }
+
+
 def _build_report_data(
-    checks, maturity, delegated_admins, account_info, delegated_admins_error=None
+    checks,
+    maturity,
+    delegated_admins,
+    account_info,
+    delegated_admins_error=None,
+    org_map=None,
+    org_map_error=None,
+    org_map_rows=None,
 ):
     """Assemble the JSON payload rendered by the Cloudscape report UI."""
     axis_scores = _calculate_axis_scores(checks)
@@ -128,6 +197,20 @@ def _build_report_data(
         "maturity": maturity,
         "delegated_administrators": delegated_admins,
         "delegated_administrators_error": delegated_admins_error,
+        # Map-level fields only. The full tree is in wafa-raw.json as
+        # organization_map; the UI renders organization_map_rows.
+        "organization_map_summary": _org_map_summary(org_map),
+        "organization_map_error": org_map_error,
+        # Flattened in Python so the UI renders structured data instead of
+        # re-deriving the hierarchy and policy labels in JavaScript, which
+        # would let the CSV and the HTML from one run disagree.
+        "organization_map_rows": _org_map_rows(org_map_rows),
+        # Labels for the guardrail policy types that are not enabled, so the
+        # UI never derives a label itself.
+        "organization_map_not_enabled_labels": [
+            policy_type_label(policy_type)
+            for policy_type in (org_map or {}).get("policyTypesNotEnabled") or []
+        ],
         "account_info": account_info,
         "axis_scores": [
             {
@@ -154,6 +237,9 @@ def generate_html(
     delegated_admins=None,
     account_info=None,
     delegated_admins_error=None,
+    org_map=None,
+    org_map_error=None,
+    org_map_rows=None,
 ):
     """Generate the interactive HTML report.
 
@@ -164,6 +250,11 @@ def generate_html(
         account_info: account info dict (optional)
         delegated_admins_error: why delegated admins could not be fully
             listed (optional)
+        org_map: organization and OU account map dict (optional, FR-12)
+        org_map_error: why the organization map could not be built (optional)
+        org_map_rows: the map's flattened rows from ``flatten_rows``. Passed
+            in so the console, the CSV, and this report render the same rows
+            from one flattening per run.
 
     Returns:
         str: Complete HTML document as string
@@ -187,7 +278,14 @@ def generate_html(
         # tojson escapes <, >, &, and ' as Unicode escapes, so AWS-provided
         # text cannot break out of the JSON data element.
         report_data=_build_report_data(
-            checks, maturity, delegated_admins, account_info, delegated_admins_error
+            checks,
+            maturity,
+            delegated_admins,
+            account_info,
+            delegated_admins_error,
+            org_map,
+            org_map_error,
+            org_map_rows,
         ),
         report_css=_load_asset("report-ui.css"),
         report_js=_load_asset("report-ui.js"),
