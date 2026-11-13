@@ -288,11 +288,15 @@ describe("report UI", () => {
     expect(container.textContent).toContain("<script>alert(1)</script>");
   });
 
-  it("does not link non-HTTP remediation URLs", () => {
+  it.each([
+    "javascript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "vbscript:msgbox(1)",
+  ])("does not link the non-HTTP remediation URL %s", (remediationLink) => {
     const { container } = renderReport({
-      checks: [check("Bad link", "incomplete", { remediationLink: "javascript:alert(1)" })],
+      checks: [check("Bad link", "incomplete", { remediationLink })],
     });
-    expect(container.querySelector('a[href^="javascript:"]')).toBeNull();
+    expect(container.querySelector('a[aria-label="Remediation guidance for Bad link"]')).toBeNull();
   });
 
   it("caveats limited account maturity", () => {
